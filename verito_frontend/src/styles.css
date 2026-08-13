@@ -1,0 +1,288 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * VERITO — Futuristic AI Investigation
+ * Dark graphite base • Crimson investigation accents • Warm metallic gold
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-crimson: var(--crimson);
+  --color-crimson-glow: var(--crimson-glow);
+  --color-gold: var(--gold);
+  --color-graphite: var(--graphite);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-brand: "Bebas Neue", "Big Shoulders Display", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  --radius: 0.75rem;
+
+  /* Base — deep graphite / near-black */
+  --background: oklch(0.14 0.01 260);
+  --foreground: oklch(0.96 0.005 260);
+
+  --graphite: oklch(0.18 0.012 260);
+  --surface: oklch(0.20 0.014 260 / 0.55);
+  --surface-2: oklch(0.24 0.014 260 / 0.65);
+
+  --card: oklch(0.18 0.012 260);
+  --card-foreground: oklch(0.96 0.005 260);
+  --popover: oklch(0.16 0.012 260);
+  --popover-foreground: oklch(0.96 0.005 260);
+
+  /* Crimson investigation accent */
+  --crimson: oklch(0.58 0.22 22);
+  --crimson-glow: oklch(0.66 0.24 22);
+  --primary: oklch(0.58 0.22 22);
+  --primary-foreground: oklch(0.98 0.005 260);
+
+  /* Warm metallic gold */
+  --gold: oklch(0.82 0.14 82);
+
+  --secondary: oklch(0.24 0.014 260);
+  --secondary-foreground: oklch(0.96 0.005 260);
+  --muted: oklch(0.22 0.012 260);
+  --muted-foreground: oklch(0.68 0.02 260);
+  --accent: oklch(0.28 0.02 260);
+  --accent-foreground: oklch(0.98 0.005 260);
+  --destructive: oklch(0.6 0.24 22);
+  --destructive-foreground: oklch(0.98 0.005 260);
+
+  --border: oklch(1 0 0 / 0.08);
+  --input: oklch(1 0 0 / 0.12);
+  --ring: oklch(0.66 0.24 22 / 0.6);
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html,
+  body {
+    background: radial-gradient(1200px 800px at 15% -10%, oklch(0.24 0.05 22 / 0.35), transparent 60%),
+      radial-gradient(1000px 700px at 100% 10%, oklch(0.22 0.03 82 / 0.18), transparent 60%),
+      var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-display);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: var(--crimson);
+    color: white;
+  }
+}
+
+/* ============ Utilities ============ */
+
+@utility glass {
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, white 6%, transparent),
+    color-mix(in oklab, white 2%, transparent)
+  );
+  backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid color-mix(in oklab, white 8%, transparent);
+  box-shadow:
+    0 1px 0 color-mix(in oklab, white 6%, transparent) inset,
+    0 20px 60px -20px oklch(0 0 0 / 0.6);
+}
+
+@utility glass-panel {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, white 4%, transparent),
+    color-mix(in oklab, white 1%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(150%);
+  border: 1px solid color-mix(in oklab, white 8%, transparent);
+}
+
+@utility crimson-glow {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--crimson) 40%, transparent),
+    0 0 30px -4px color-mix(in oklab, var(--crimson) 60%, transparent),
+    0 0 80px -20px color-mix(in oklab, var(--crimson) 80%, transparent);
+}
+
+@utility gold-text {
+  background: linear-gradient(180deg, oklch(0.92 0.13 85), oklch(0.72 0.14 78));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility grid-bg {
+  background-image:
+    linear-gradient(to right, oklch(1 0 0 / 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 0.04) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse at center, black 40%, transparent 85%);
+}
+
+@utility scan-line {
+  position: relative;
+  overflow: hidden;
+}
+@utility noise {
+  position: relative;
+}
+.noise::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.5'/></svg>");
+}
+
+
+/* ============ Keyframes ============ */
+@keyframes scan-y {
+  0% { transform: translateY(-120%); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(320%); opacity: 0; }
+}
+@keyframes scan-x {
+  0% { transform: translateX(-120%); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateX(320%); opacity: 0; }
+}
+@keyframes pulse-node {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--crimson) 60%, transparent); }
+  50% { box-shadow: 0 0 0 12px transparent; }
+}
+@keyframes float-y {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+@keyframes wordmark-reveal {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes laser-sweep {
+  0% { transform: translateX(-100%); opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+@keyframes draw-line {
+  from { stroke-dashoffset: var(--l, 400); }
+  to   { stroke-dashoffset: 0; }
+}
+@keyframes fingerprint-scan {
+  0% { clip-path: inset(0 0 100% 0); }
+  100% { clip-path: inset(0 0 0 0); }
+}
+
+.animate-scan-y { animation: scan-y 3.5s ease-in-out infinite; }
+.animate-scan-y-once { animation: scan-y 2.4s ease-in-out 0.4s 1 both; }
+.animate-scan-x { animation: scan-x 4s ease-in-out infinite; }
+.animate-pulse-node { animation: pulse-node 2s ease-out infinite; }
+.animate-float-y { animation: float-y 6s ease-in-out infinite; }
+.animate-wordmark { animation: wordmark-reveal 1.2s cubic-bezier(0.2,0.7,0.2,1) both; }
+.animate-laser { animation: laser-sweep 2.2s ease-in-out infinite; }
+.animate-laser-once { animation: laser-sweep 2.2s ease-in-out 0.6s 1 both; }
+
+/* Pinned paper card (evidence board note) */
+@keyframes pin-tilt-in {
+  0% { opacity: 0; transform: translateY(20px) rotate(var(--tilt, -2deg)) scale(0.96); }
+  100% { opacity: 1; transform: translateY(0) rotate(var(--tilt, -2deg)) scale(1); }
+}
+.pin-note {
+  background:
+    linear-gradient(180deg, oklch(0.96 0.02 85 / 0.96), oklch(0.9 0.03 82 / 0.94));
+  color: oklch(0.24 0.02 60);
+  border: 1px solid oklch(0.75 0.05 82 / 0.5);
+  box-shadow:
+    0 10px 30px -12px oklch(0 0 0 / 0.7),
+    0 2px 0 oklch(0 0 0 / 0.15) inset;
+  transform: rotate(var(--tilt, -2deg));
+  animation: pin-tilt-in 0.7s ease-out both;
+}
+.pin-note.dark-note {
+  background:
+    linear-gradient(180deg, oklch(0.22 0.01 260 / 0.9), oklch(0.18 0.012 260 / 0.9));
+  color: oklch(0.94 0.005 260);
+  border: 1px solid oklch(1 0 0 / 0.08);
+}
+.pin-thumbtack {
+  width: 22px; height: 22px; border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, oklch(0.85 0.16 22), oklch(0.5 0.22 22) 60%, oklch(0.3 0.14 22) 100%);
+  box-shadow:
+    0 2px 4px oklch(0 0 0 / 0.6),
+    0 0 12px oklch(0.66 0.24 22 / 0.6),
+    inset 0 1px 2px oklch(1 0 0 / 0.4);
+}
+
+.evidence-card {
+  transition: transform 0.35s ease, box-shadow 0.35s ease;
+}
+.evidence-card:hover {
+  transform: rotate(0deg) translateY(-4px) !important;
+  box-shadow:
+    0 0 0 1px oklch(0.66 0.24 22 / 0.4),
+    0 20px 60px -20px oklch(0.66 0.24 22 / 0.35),
+    0 30px 80px -30px oklch(0 0 0 / 0.8);
+}
+
+/* ── Sidebar scrollbar ─────────────────────────────────────────────────────── */
+.sidebar-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(1 0 0 / 0.08) transparent;
+}
+.sidebar-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.sidebar-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scrollbar::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 0.08);
+  border-radius: 9999px;
+}
+.sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 0.15);
+}
+

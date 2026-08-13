@@ -1,0 +1,275 @@
+# VERITO Evidence Collector Agent — Full Implementation Plan
+
+## Overview
+
+Rebuild the Evidence Collector Agent pipeline with the correct file architecture, proper parsers, EasyOCR + Qwen2.5-VL vision, BAAI/bge-small-en-v1.5 embeddings, and Qdrant Cloud vector store — replacing Chroma and pytesseract/all-MiniLM-L6-v2.
+
+---
+
+## What Changes vs. What Stays
+
+### STAYS (untouched — used by other parts of VERITO)
+| File | Reason |
+|---|---|
+| `app/main.py` | Only add new router import, keep all others |
+| `app/api/auth.py`, `investigations.py`, `agents.py`, `reports.py`, `chat.py` | Unrelated |
+| `app/database/`, `app/dependencies/`, `app/workflows/` | Unrelated |
+| `app/agents/evidence_analyzer.py`, `evidence_linker.py`, `report_generator.py`, etc. | Other agents |
+| `app/services/auth_service.py`, `audio_service.py`, `llm_service.py`, `investigation_service.py`, `report_service.py` | Unrelated |
+| `app/models/` (all), `app/schemas/` (all) | Keep, extend evidence model |
+| `app/utils/datetime_utils.py`, `id_generator.py` | Kept as-is |
+| `app/core/exceptions.py`, `app/core/security.py` | Kept as-is |
+
+### REMOVED (replaced)
+| File | Why |
+|---|---|
+| `app/services/chroma_service.py` | Replaced by Qdrant |
+| `app/services/embedding_service.py` | Replaced (all-MiniLM → BAAI/bge-small-en-v1.5) |
+| `app/services/image_service.py` | Replaced (pytesseract → EasyOCR + Qwen2.5-VL) |
+| `app/services/document_parser.py` | Replaced by dedicated parser modules |
+| `chromadb` from requirements.txt | Replaced by qdrant-client |
+| `sentence-transformers` model change | all-MiniLM-L6-v2 → BAAI/bge-small-en-v1.5 |
+| `pytesseract` from requirements.txt | Replaced by easyocr |
+| Chroma settings from `.env` and `core/config.py` | Replaced by Qdrant settings |
+
+### NEW (created)
+All new files live in the target architecture.
+
+---
+
+## Target File Structure (New Folders/Files)
+
+```
+backend/app/
+├── config/                          ← NEW folder (maps to existing core/config.py logic)
+│   ├── __init__.py
+│   └── settings.py                  ← settings re-exported from core/config.py
+│
+├── parsers/                         ← NEW folder
+│   ├── __init__.py
+│   ├── pdf_parser.py               ← PyMuPDF + EasyOCR fallback for scanned PDFs
+│   ├── image_parser.py             ← EasyOCR + Qwen2.5-VL captioning
+│   ├── email_parser.py             ← Python's email library
+│   ├── chat_parser.py              ← Plain text / JSON chat log parser
+│   ├── csv_parser.py               ← Python's csv module
+│   └── docx_parser.py              ← python-docx
+│
+├── services/
+│   ├── ocr_service.py              ← NEW: EasyOCR wrapper
+│   ├── caption_service.py          ← NEW: Qwen2.5-VL vision description
+│   ├── text_cleaner.py             ← NEW: Evidence-preserving text cleaner
+│   ├── chunking_service.py         ← NEW: Sliding-window chunker
+│   ├── embedding_service.py        ← REPLACE: BAAI/bge-small-en-v1.5
+│   └── vector_store.py             ← NEW: Qdrant Cloud client (replaces chroma_service.py)
+│
+├── agents/
+│   └── evidence_collector.py       ← REPLACE: Full pipeline agent
+│
+├── routes/                         ← NEW folder (mirrors api/ for evidence)
+│   ├── __init__.py
+│   └── evidence_routes.py          ← NEW: Clean evidence upload/query routes
+│
+└── utils/
+    ├── file_detector.py            ← NEW: Replaces parts of file_utils.py detect_kind
+    └── file_manager.py             ← NEW: Wraps save_upload / read_file logic
+```
+
+> Note: `app/config/` re-exports from `app/core/config.py` so existing code using core/config is not broken.
+
+---
+
+## Proposed Changes
+
+### Component 1 — Configuration
+
+#### [MODIFY] [.env](file:///d:/VERITO/backend/.env)
+- Remove Chroma variables
+- Add Qdrant Cloud variables (`QDRANT_API_KEY`, `QDRANT_URL`, `QDRANT_COLLECTION`)
+
+#### [MODIFY] [config.py](file:///d:/VERITO/backend/app/core/config.py)
+- Remove `chroma_api_key`, `chroma_tenant`, `chroma_database`, `chroma_collection`
+- Add `qdrant_url`, `qdrant_api_key`, `qdrant_collection`
+
+#### [NEW] `app/config/__init__.py` and `app/config/settings.py`
+- Re-exports `get_settings` and `Settings` from `app.core.config` so either import path works
+
+---
+
+### Component 2 — Parsers (all NEW files under `app/parsers/`)
+
+#### [NEW] `app/parsers/pdf_parser.py`
+- PyMuPDF extracts text from digital PDFs
+- **Fallback**: if a page has no text, converts page → PIL Image → EasyOCR
+- Returns combined page-by-page text
+
+#### [NEW] `app/parsers/image_parser.py`
+- Calls `ocr_service.extract_text()` for OCR text (EasyOCR)
+- Calls `caption_service.describe_image()` for AI scene description (Qwen2.5-VL)
+- Combines both into structured output: `OCR TEXT:\n...\n\nIMAGE DESCRIPTION:\n...`
+
+#### [NEW] `app/parsers/email_parser.py`
+- Python `email` stdlib, handles multipart
+- Extracts: From, To, Subject, Date, body text
+
+#### [NEW] `app/parsers/chat_parser.py`
+- Handles `.txt` chat logs and `.json` structured chat exports
+- Formats as `[Timestamp] Sender: Message`
+
+#### [NEW] `app/parsers/csv_parser.py`
+- Python `csv` stdlib
+- Row-by-row extraction with header labels
+
+#### [NEW] `app/parsers/docx_parser.py`
+- `python-docx`: paragraphs + tables extracted
+
+#### [NEW] `app/parsers/__init__.py`
+
+---
+
+### Component 3 — Services (new/replaced under `app/services/`)
+
+#### [NEW] `app/services/ocr_service.py`
+- EasyOCR reader (lazy-loaded, singleton per language set)
+- `extract_text(image_bytes) → str`
+- Supports: `en` language by default
+
+#### [NEW] `app/services/caption_service.py`
+- Qwen2.5-VL via `transformers` (lazy-loaded)
+- `describe_image(image_bytes, filename) → str`
+- Generates scene-level description from image
+
+#### [NEW] `app/services/text_cleaner.py`
+- Evidence-preserving cleaner (no stemming/stop-word removal)
+- Normalises whitespace, removes control chars
+- Preserves IDs, dates, numbers, names
+
+#### [NEW] `app/services/chunking_service.py`
+- Sliding-window chunker: `chunk_size=512`, `overlap=64` (chars)
+- Returns `list[str]`
+
+#### [REPLACE] [embedding_service.py](file:///d:/VERITO/backend/app/services/embedding_service.py)
+- Replace `all-MiniLM-L6-v2` with `BAAI/bge-small-en-v1.5`
+- `EMBEDDING_DIMENSION = 384` stays (same dim for bge-small)
+- Keeps `embed_texts()`, `embed_query()` API identical
+
+#### [NEW] `app/services/vector_store.py`
+- Qdrant Cloud client (lazy singleton)
+- `store_evidence_chunks(text, user_id, investigation_id, evidence_id, filename) → int`
+- `query_evidence(query, investigation_id, n_results) → list[dict]`
+- `delete_investigation_chunks(investigation_id) → None`
+- Collection: `QDRANT_COLLECTION` from settings (auto-created if not exists)
+- Distance: `COSINE`
+
+#### [DELETE] `app/services/chroma_service.py`
+#### [DELETE] `app/services/image_service.py` (replaced by parsers/image_parser.py + ocr_service + caption_service)
+#### [DELETE] `app/services/document_parser.py` (replaced by parsers/)
+
+---
+
+### Component 4 — Evidence Collector Agent
+
+#### [REPLACE] [evidence_collector.py](file:///d:/VERITO/backend/app/agents/evidence_collector.py)
+Full pipeline:
+1. Fetch evidence docs for investigation from MongoDB
+2. For each file: read bytes from disk → dispatch to correct parser
+3. Clean text → chunk → embed → upsert to Qdrant Cloud
+4. Emit SSE activity lines per step
+5. Update agent_run document in MongoDB on completion
+
+---
+
+### Component 5 — Routes
+
+#### [NEW] `app/routes/__init__.py`
+#### [NEW] `app/routes/evidence_routes.py`
+- `POST /evidence/upload/{investigation_id}` — upload + full pipeline
+- `GET /evidence/{investigation_id}` — list evidence
+- Mirrors and replaces `app/api/evidence.py` logic using new services
+
+#### [MODIFY] [main.py](file:///d:/VERITO/backend/app/main.py)
+- Add `from app.routes import evidence_routes`
+- Register `evidence_routes.router` (keep existing `evidence.router` under `/api` as-is to not break frontend until migration is complete — new routes under `/api/v2/evidence`)
+
+---
+
+### Component 6 — Utils
+
+#### [NEW] `app/utils/file_detector.py`
+- `detect_file_type(filename) → Literal["pdf","image","email","chat","csv","docx","txt","unknown"]`
+- More granular than existing `detect_kind()`
+
+#### [NEW] `app/utils/file_manager.py`
+- `save_file(bytes, filename, user_id, inv_id) → str`
+- `read_file(path) → bytes`
+- Wraps existing `file_utils.py` (does NOT delete file_utils.py — still used elsewhere)
+
+---
+
+### Component 7 — Evidence Service (Update)
+
+#### [MODIFY] [evidence_service.py](file:///d:/VERITO/backend/app/services/evidence_service.py)
+- Replace `chroma_service` import with `vector_store`
+- Replace `image_service` import with new `image_parser`
+- Replace `document_parser` import with new `parsers/` modules
+- Pipeline: parse → clean → chunk → embed → qdrant store
+
+---
+
+### Component 8 — RAG Service (Update)
+
+#### [MODIFY] [rag_service.py](file:///d:/VERITO/backend/app/services/rag_service.py)
+- Replace `chroma_service.query_evidence` with `vector_store.query_evidence`
+
+---
+
+### Component 9 — Tests
+
+#### [NEW] `tests/test_qdrant.py` — Qdrant connection + upsert + query test
+#### [NEW] `tests/test_embedding.py` — BAAI/bge-small-en-v1.5 embed test
+#### [NEW] `tests/test_parsers.py` — PDF, DOCX, CSV, email, chat parser unit tests
+
+---
+
+### Component 10 — Requirements
+
+#### [MODIFY] [requirements.txt](file:///d:/VERITO/backend/requirements.txt)
+```
+REMOVE: chromadb==0.6.3
+REMOVE: pytesseract==0.3.13
+KEEP:   sentence-transformers (model name change is in code only)
+KEEP:   pillow (needed by EasyOCR and image handling)
+ADD:    qdrant-client>=1.9.0
+ADD:    easyocr>=1.7.1
+ADD:    transformers>=4.40.0
+ADD:    torch>=2.2.0           (for Qwen2.5-VL and EasyOCR)
+ADD:    accelerate>=0.27.0     (for Qwen2.5-VL model loading)
+ADD:    qwen-vl-utils>=0.0.8   (Qwen2.5-VL helper)
+```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+cd backend
+pytest tests/test_qdrant.py -v
+pytest tests/test_embedding.py -v
+pytest tests/test_parsers.py -v
+```
+
+### Manual Verification
+- Upload a digital PDF → verify text extracted by PyMuPDF
+- Upload a scanned PDF image → verify EasyOCR fallback kicks in
+- Upload a JPEG → verify OCR text + AI scene description combined
+- Upload CSV, DOCX, .eml → verify clean text extraction
+- Check Qdrant Cloud dashboard for stored vectors
+- Run existing `/api/evidence/upload/` endpoint to confirm backward compatibility
+
+---
+
+> [!IMPORTANT]
+> **Qwen2.5-VL Model Size**: This is a multi-billion parameter vision LLM. First-time load will download several GB. It will be lazy-loaded (only when an image is processed). On machines without a GPU, inference will be slow — this is expected.
+
+> [!NOTE]
+> **No breaking changes to other agents**: `evidence_analyzer.py`, `evidence_linker.py`, `timeline_builder.py`, `report_generator.py`, `subject_analyzer.py` and all API routes except `evidence_service.py` are untouched.

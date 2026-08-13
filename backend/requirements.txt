@@ -1,0 +1,67 @@
+# VERITO Backend — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Web Framework ──────────────────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+
+# ── Database ───────────────────────────────────────────────────────────────────
+motor==3.6.0
+pymongo>=4.9,<4.10
+
+# ── Vector Store (Qdrant Cloud) ────────────────────────────────────────────────
+qdrant-client>=1.9.0
+
+# ── Embeddings (BAAI/bge-small-en-v1.5) ───────────────────────────────────────
+sentence-transformers>=3.3.1
+
+# ── LLM (Groq) ─────────────────────────────────────────────────────────────────
+groq==0.12.0
+
+# ── AI Workflow (LangGraph + LangChain) ────────────────────────────────────────
+langgraph==0.2.60
+langchain-core==0.3.28
+
+# ── Authentication ─────────────────────────────────────────────────────────────
+pyjwt==2.10.1
+argon2-cffi==23.1.0
+firebase-admin==6.6.0
+
+# ── Document Parsing (Docling) ─────────────────────────────────────────────────
+# Replaces PyMuPDF (pdf_parser) and python-docx (docx_parser).
+# Handles: PDF (digital + scanned OCR), DOCX, PPTX, HTML, Markdown.
+# Preserves document structure: headings, paragraphs, lists, tables, reading order.
+docling>=2.5.0
+
+# ── Image OCR (EasyOCR) ────────────────────────────────────────────────────────
+# Used by image_parser.py for extracting visible text from image evidence.
+easyocr>=1.7.1
+pillow>=11.1.0           # Image loading/resizing for EasyOCR and Gemini payloads
+
+# ── Vision API (Gemini 2.5 Flash — for image scene description) ───────────────
+httpx>=0.28.1            # HTTP client for Gemini API calls
+torch>=2.2.0             # Deep learning backend required by EasyOCR
+
+# ── Excel Parsing (pandas + openpyxl) ─────────────────────────────────────────
+# Used by excel_parser.py for .xlsx / .xls evidence files.
+pandas>=2.2.0
+openpyxl>=3.1.0          # pandas Excel engine for .xlsx files
+xlrd>=2.0.1              # pandas Excel engine for legacy .xls files
+
+# ── XML Parsing (lxml) ────────────────────────────────────────────────────────
+# Used by xml_parser.py; falls back to stdlib ElementTree if unavailable.
+lxml>=5.0.0
+
+# ── Outlook MSG Parsing (extract-msg) ─────────────────────────────────────────
+# Used by msg_parser.py for Outlook .msg evidence files.
+extract-msg>=0.48.0
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+pydantic==2.10.4
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# ── Testing ────────────────────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.25.2
