@@ -1,13 +1,21 @@
 """
 agents/evidence_linker.py
 --------------------------
-Agent 04 — Evidence Linker
-Finds relationships between evidence items:
-shared phone numbers, matching timestamps, common locations, etc.
+Agent 04 - Evidence Linker
+
+Finds evidence-to-evidence relationships from deterministic analyzer/timeline
+signals first, then lets the LLM synthesize concise labels and classifications.
+Every saved link is validated against deterministic support and provenance.
 """
 
+from __future__ import annotations
+
 import asyncio
-from typing import Callable, Awaitable
+import itertools
+import json
+import re
+from collections import defaultdict
+from typing import Awaitable, Callable
 
 from app.database import collections
 from app.services.llm_service import chat_completion_json
@@ -16,38 +24,82 @@ from app.utils.datetime_utils import utcnow
 Emitter = Callable[[str, dict], Awaitable[None]]
 
 _SYSTEM_PROMPT = """You are a forensic link analyst.
-Find relationships and connections between the provided evidence items.
+Classify and explain ONLY the provided deterministic link candidates.
 
-Look for:
-- Shared phone numbers, emails or contact information
-- Matching or overlapping timestamps
-- Same locations or places
-- Common people or organisations
-- Consistent or contradictory statements
-- Corroborating details across multiple items
+Rules:
+- Do not invent links, evidence IDs, entities, timestamps, places, or reasons.
+- Use only candidate_id values from the provided candidates.
+- A link is strong when it has unique/high-value identifiers or multiple support types.
+- A link is moderate when it has meaningful corroboration but weaker uniqueness.
+- A link is weak when the shared value is broad, common, or only lightly supportive.
+- Mention contradiction only when the candidate support explicitly says contradiction.
+- Return ONLY valid JSON in the requested schema.
 
-Return ONLY valid JSON:
+Return JSON:
 {
   "links": [
     {
-      "a": "E-001",
-      "b": "E-003",
-      "reason": "Both contain the phone number +44 7700 900123",
-      "strength": "strong" | "moderate" | "weak"
+      "candidate_id": "L-001",
+      "reason": "brief evidence-grounded explanation",
+      "strength": "strong" | "moderate" | "weak",
+      "confidence": "high" | "medium" | "low"
     }
-  ],
-  "strong_links": 0,
-  "weak_links": 0
+  ]
+}"""
+
+_ENTITY_FIELDS = (
+    "contact_info",
+    "people",
+    "organisations",
+    "locations",
+    "dates",
+    "times",
+)
+_FIELD_TYPE = {
+    "contact_info": "shared_contact",
+    "people": "shared_person",
+    "organisations": "shared_organisation",
+    "locations": "shared_location",
+    "dates": "shared_date",
+    "times": "shared_time",
 }
+_FIELD_LABEL = {
+    "contact_info": "contact detail",
+    "people": "person",
+    "organisations": "organisation",
+    "locations": "location",
+    "dates": "date",
+    "times": "time",
+}
+_FIELD_SCORE = {
+    "contact_info": 5.0,
+    "people": 3.0,
+    "organisations": 3.0,
+    "locations": 2.0,
+    "dates": 1.5,
+    "times": 1.0,
+}
+_VALID_STRENGTHS = {"strong", "moderate", "weak"}
+_VALID_CONFIDENCE = {"high", "medium", "low"}
+_MAX_CANDIDATES_FOR_LLM = 60
+_MAX_SHARED_VALUES_PER_SUPPORT = 6
+_MAX_PROVENANCE_ITEMS = 20
 
-Only report connections with clear evidence. Do not guess."""
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_URL_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
+_NON_DIGIT_RE = re.compile(r"\D+")
 
 
-async def run(investigation_id: str, emit: Emitter, analyzer_output: dict) -> dict:
+async def run(
+    investigation_id: str,
+    emit: Emitter,
+    analyzer_output: dict,
+    timeline_output: dict,
+) -> dict:
     """Run the Evidence Linker agent."""
     agent_id = "linker"
     await _set_status(investigation_id, agent_id, "running")
-    lines = []
+    lines: list[dict] = []
 
     async def add_line(kind: str, text: str) -> None:
         line = {"kind": kind, "text": text}
@@ -55,62 +107,592 @@ async def run(investigation_id: str, emit: Emitter, analyzer_output: dict) -> di
         await _append_line(investigation_id, agent_id, line)
         await emit("agent_activity", {"agent_id": agent_id, "line": line})
 
-    await add_line("scan", "Cross-referencing evidence items for shared attributes...")
+    await add_line("scan", "Building deterministic evidence link candidates...")
 
-    # Build evidence summary for the LLM
     evidence_docs = await collections.evidence().find(
         {"investigation_id": investigation_id}
     ).to_list(length=None)
+    evidence_ids = {str(ev.get("evidence_id") or "") for ev in evidence_docs}
 
-    summaries = []
-    for ev in evidence_docs:
-        content = ev.get("content", "")
-        if content:
-            summaries.append(f"[{ev['evidence_id']}] {ev['filename']}:\n{content[:1500]}")
+    candidates = _build_link_candidates(evidence_docs, analyzer_output, timeline_output)
+    await add_line(
+        "info",
+        f"Found {len(candidates)} candidate link(s) with deterministic support.",
+    )
 
-    combined = "\n\n".join(summaries) if summaries else "No evidence content."
+    if not candidates:
+        output = _empty_output()
+        await add_line("warn", "No cross-evidence support was found.")
+        await _complete(investigation_id, agent_id, lines, ["No evidence links"], output)
+        await emit("agent_completed", {"agent_id": agent_id})
+        return output
 
+    compact_candidates = _compact_candidates_for_llm(candidates)
     try:
-        result = await chat_completion_json(
+        await add_line("scan", "Synthesising supported links from candidates...")
+        synthesis = await chat_completion_json(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": f"Evidence items:\n\n{combined[:8000]}"},
+                {
+                    "role": "user",
+                    "content": (
+                        "Deterministic link candidates:\n"
+                        f"{json.dumps(compact_candidates, separators=(',', ':'))}"
+                    ),
+                },
             ],
             temperature=0.1,
+            max_tokens=3500,
         )
-    except Exception as e:
-        await add_line("warn", f"Link analysis failed: {str(e)[:80]}")
-        result = {"links": [], "strong_links": 0, "weak_links": 0}
+    except Exception as exc:
+        await add_line("warn", f"LLM link synthesis failed: {str(exc)[:80]}")
+        synthesis = _fallback_synthesis(candidates)
 
-    links = result.get("links", [])
+    links = _validate_links(
+        synthesis.get("links", []),
+        candidates=candidates,
+        valid_evidence_ids=evidence_ids,
+    )
+    output = _build_output(links, candidates)
+
     await asyncio.sleep(0.2)
 
-    strong_count = 0
-    weak_count = 0
+    for link in links[:12]:
+        line_kind = "ok" if link["strength"] != "weak" else "warn"
+        await add_line(
+            line_kind,
+            (
+                f"{link['a']} <-> {link['b']}: {link['reason']} "
+                f"[{link['strength']}]"
+            ),
+        )
 
-    for link in links:
-        strength = link.get("strength", "moderate")
-        if strength == "strong":
-            strong_count += 1
-            await add_line("ok", f"{link['a']} ↔ {link['b']}: {link['reason']}")
-        elif strength == "weak":
-            weak_count += 1
-            await add_line("warn", f"Weak link — {link['a']} ↔ {link['b']}: {link['reason']}")
-        else:
-            await add_line("ok", f"{link['a']} ↔ {link['b']}: {link['reason']}")
+    if len(links) > 12:
+        await add_line("info", f"{len(links) - 12} additional link(s) saved.")
 
-    result["strong_links"] = strong_count
-    result["weak_links"] = weak_count
+    await add_line(
+        "ok",
+        (
+            f"{len(links)} validated link(s): "
+            f"{output['strong_links']} strong, "
+            f"{output['moderate_links']} moderate, "
+            f"{output['weak_links']} weak."
+        ),
+    )
 
     summary = [
-        f"{strong_count} strong link{'s' if strong_count != 1 else ''}",
-        f"{weak_count} weak link{'s' if weak_count != 1 else ''}",
+        f"{output['strong_links']} strong link(s)",
+        f"{output['moderate_links']} moderate link(s)",
+        f"{output['weak_links']} weak link(s)",
     ]
 
-    await _complete(investigation_id, agent_id, lines, summary, result)
+    await _complete(investigation_id, agent_id, lines, summary, output)
     await emit("agent_completed", {"agent_id": agent_id})
+    return output
 
-    return result
+
+def _empty_output() -> dict:
+    return {
+        "links": [],
+        "strong_links": 0,
+        "moderate_links": 0,
+        "weak_links": 0,
+        "candidate_count": 0,
+        "supported_candidate_count": 0,
+        "link_types": {},
+        "link_candidates": [],
+    }
+
+
+def _build_link_candidates(
+    evidence_docs: list[dict],
+    analyzer_output: dict,
+    timeline_output: dict,
+) -> list[dict]:
+    filenames = {
+        str(ev.get("evidence_id") or ""): str(ev.get("filename") or "unknown")
+        for ev in evidence_docs
+        if ev.get("evidence_id")
+    }
+    buckets = analyzer_output.get("entities_by_evidence", {})
+    if not isinstance(buckets, dict):
+        buckets = {}
+
+    pair_supports: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    value_frequencies = _build_value_frequencies(buckets)
+
+    for field in _ENTITY_FIELDS:
+        index = _build_entity_index(buckets, field)
+        for normalised, evidence_values in index.items():
+            evidence_list = sorted(evidence_values)
+            if len(evidence_list) < 2:
+                continue
+
+            uniqueness = len(evidence_list)
+            for a, b in itertools.combinations(evidence_list, 2):
+                originals_a = evidence_values[a]
+                originals_b = evidence_values[b]
+                shared_values = _shared_display_values(originals_a, originals_b)
+                support = _entity_support(
+                    field=field,
+                    normalised=normalised,
+                    shared_values=shared_values,
+                    a=a,
+                    b=b,
+                    filenames=filenames,
+                    uniqueness=uniqueness,
+                    frequency=value_frequencies.get((field, normalised), uniqueness),
+                )
+                pair_supports[_pair_key(a, b)].append(support)
+
+    for support in _timeline_supports(timeline_output, filenames):
+        pair_supports[_pair_key(support["a"], support["b"])].append(support)
+
+    candidates = []
+    for index, (pair, supports) in enumerate(sorted(pair_supports.items()), start=1):
+        supports = _dedupe_supports(supports)
+        score = sum(float(s.get("score", 0)) for s in supports)
+        candidates.append(
+            _candidate_from_supports(
+                candidate_id=f"L-{index:03d}",
+                pair=pair,
+                supports=supports,
+                score=score,
+            )
+        )
+
+    return sorted(candidates, key=lambda c: (-c["score"], c["a"], c["b"]))
+
+
+def _build_value_frequencies(buckets: dict) -> dict[tuple[str, str], int]:
+    frequencies: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for evidence_id, bucket in buckets.items():
+        if not isinstance(bucket, dict):
+            continue
+        for current_field in _ENTITY_FIELDS:
+            for value in _clean_list(bucket.get(current_field, [])):
+                normalised = _normalise_entity(current_field, value)
+                if normalised:
+                    frequencies[(current_field, normalised)].add(str(evidence_id))
+    return {key: len(ids) for key, ids in frequencies.items()}
+
+
+def _build_entity_index(buckets: dict, field: str) -> dict[str, dict[str, list[str]]]:
+    index: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for evidence_id, bucket in buckets.items():
+        if not isinstance(bucket, dict):
+            continue
+
+        for value in _clean_list(bucket.get(field, [])):
+            normalised = _normalise_entity(field, value)
+            if not normalised:
+                continue
+            target = index[normalised][str(evidence_id)]
+            if value not in target:
+                target.append(value)
+
+    return index
+
+
+def _entity_support(
+    *,
+    field: str,
+    normalised: str,
+    shared_values: list[str],
+    a: str,
+    b: str,
+    filenames: dict[str, str],
+    uniqueness: int,
+    frequency: int,
+) -> dict:
+    uniqueness_bonus = 1.5 if frequency == 2 else 0.75 if frequency <= 4 else 0.0
+    score = _FIELD_SCORE[field] + uniqueness_bonus
+    if field in {"dates", "times"} and frequency > 4:
+        score *= 0.5
+
+    label = _FIELD_LABEL[field]
+    return {
+        "type": _FIELD_TYPE[field],
+        "field": field,
+        "a": a,
+        "b": b,
+        "shared_values": shared_values[:_MAX_SHARED_VALUES_PER_SUPPORT],
+        "normalised_value": normalised,
+        "reason_hint": (
+            f"Both evidence items share {label}: "
+            f"{', '.join(shared_values[:3]) or normalised}."
+        ),
+        "score": round(score, 2),
+        "uniqueness": uniqueness,
+        "provenance": [
+            {
+                "evidence_id": a,
+                "filename": filenames.get(a, "unknown"),
+                "field": field,
+                "value": shared_values[0] if shared_values else normalised,
+            },
+            {
+                "evidence_id": b,
+                "filename": filenames.get(b, "unknown"),
+                "field": field,
+                "value": shared_values[-1] if shared_values else normalised,
+            },
+        ],
+    }
+
+
+def _timeline_supports(timeline_output: dict, filenames: dict[str, str]) -> list[dict]:
+    events = timeline_output.get("events", [])
+    if not isinstance(events, list):
+        return []
+
+    supports = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+
+        refs = sorted(set(_clean_list(event.get("refs", []))))
+        if len(refs) < 2:
+            continue
+
+        sort_time = _normalise_text(event.get("sort_time"))
+        event_text = _normalise_text(event.get("event", "")) or "same timeline event"
+        classification = (_normalise_text(event.get("classification")) or "FACT").upper()
+        confidence = (_normalise_text(event.get("confidence")) or "medium").lower()
+        score = 3.0 if sort_time else 2.0
+        if classification == "FACT":
+            score += 0.5
+        if confidence == "high":
+            score += 0.5
+
+        for a, b in itertools.combinations(refs, 2):
+            supports.append(
+                {
+                    "type": "temporal_overlap",
+                    "field": "timeline",
+                    "a": a,
+                    "b": b,
+                    "shared_values": [sort_time or event.get("time") or "timeline event"],
+                    "normalised_value": sort_time or event_text.casefold(),
+                    "reason_hint": f"Both evidence items support timeline event: {event_text}.",
+                    "score": round(score, 2),
+                    "uniqueness": len(refs),
+                    "provenance": [
+                        {
+                            "evidence_id": a,
+                            "filename": filenames.get(a, "unknown"),
+                            "field": "timeline",
+                            "value": event_text,
+                            "sort_time": sort_time or None,
+                        },
+                        {
+                            "evidence_id": b,
+                            "filename": filenames.get(b, "unknown"),
+                            "field": "timeline",
+                            "value": event_text,
+                            "sort_time": sort_time or None,
+                        },
+                    ],
+                }
+            )
+
+    return supports
+
+
+def _candidate_from_supports(
+    *,
+    candidate_id: str,
+    pair: tuple[str, str],
+    supports: list[dict],
+    score: float,
+) -> dict:
+    types = sorted({support["type"] for support in supports})
+    provenance = []
+    for support in supports:
+        provenance.extend(support.get("provenance", []))
+
+    return {
+        "candidate_id": candidate_id,
+        "a": pair[0],
+        "b": pair[1],
+        "types": types,
+        "support_count": len(supports),
+        "score": round(score, 2),
+        "suggested_strength": _strength_from_score(score, supports),
+        "suggested_confidence": _confidence_from_score(score, supports),
+        "reason_hint": _reason_hint(supports),
+        "supports": supports,
+        "provenance": _dedupe_provenance(provenance)[:_MAX_PROVENANCE_ITEMS],
+    }
+
+
+def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
+    compact = []
+    for candidate in candidates[:_MAX_CANDIDATES_FOR_LLM]:
+        compact.append(
+            {
+                "candidate_id": candidate["candidate_id"],
+                "a": candidate["a"],
+                "b": candidate["b"],
+                "types": candidate["types"],
+                "score": candidate["score"],
+                "suggested_strength": candidate["suggested_strength"],
+                "suggested_confidence": candidate["suggested_confidence"],
+                "reason_hint": candidate["reason_hint"],
+                "supports": [
+                    {
+                        "type": support["type"],
+                        "field": support["field"],
+                        "shared_values": support["shared_values"],
+                        "uniqueness": support.get("uniqueness"),
+                        "reason_hint": support["reason_hint"],
+                    }
+                    for support in candidate["supports"][:8]
+                ],
+            }
+        )
+    return compact
+
+
+def _fallback_synthesis(candidates: list[dict]) -> dict:
+    return {
+        "links": [
+            {
+                "candidate_id": candidate["candidate_id"],
+                "reason": candidate["reason_hint"],
+                "strength": candidate["suggested_strength"],
+                "confidence": candidate["suggested_confidence"],
+            }
+            for candidate in candidates[:_MAX_CANDIDATES_FOR_LLM]
+        ]
+    }
+
+
+def _validate_links(
+    links: object,
+    *,
+    candidates: list[dict],
+    valid_evidence_ids: set[str],
+    allow_fallback: bool = True,
+) -> list[dict]:
+    if not isinstance(links, list):
+        links = []
+
+    candidate_by_id = {candidate["candidate_id"]: candidate for candidate in candidates}
+    cleaned_links = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+
+        candidate = candidate_by_id.get(str(item.get("candidate_id") or ""))
+        if not candidate:
+            continue
+
+        a = candidate["a"]
+        b = candidate["b"]
+        if a == b or a not in valid_evidence_ids or b not in valid_evidence_ids:
+            continue
+        if not candidate.get("supports") or not candidate.get("provenance"):
+            continue
+
+        pair = _pair_key(a, b)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+
+        strength = str(item.get("strength") or candidate["suggested_strength"]).lower()
+        if strength not in _VALID_STRENGTHS:
+            strength = candidate["suggested_strength"]
+        strength = _cap_strength_by_support(strength, candidate)
+
+        confidence = str(item.get("confidence") or candidate["suggested_confidence"]).lower()
+        if confidence not in _VALID_CONFIDENCE:
+            confidence = candidate["suggested_confidence"]
+
+        reason = _normalise_text(item.get("reason")) or candidate["reason_hint"]
+        cleaned_links.append(
+            {
+                "a": a,
+                "b": b,
+                "reason": reason,
+                "strength": strength,
+                "confidence": confidence,
+                "types": candidate["types"],
+                "score": candidate["score"],
+                "support_count": candidate["support_count"],
+                "supports": candidate["supports"],
+                "provenance": candidate["provenance"],
+                "candidate_id": candidate["candidate_id"],
+            }
+        )
+
+    if cleaned_links or not allow_fallback:
+        return sorted(cleaned_links, key=lambda link: (-link["score"], link["a"], link["b"]))
+
+    return _validate_links(
+        _fallback_synthesis(candidates).get("links", []),
+        candidates=candidates,
+        valid_evidence_ids=valid_evidence_ids,
+        allow_fallback=False,
+    )
+
+
+def _build_output(links: list[dict], candidates: list[dict]) -> dict:
+    type_counts: dict[str, int] = defaultdict(int)
+    for link in links:
+        for link_type in link.get("types", []):
+            type_counts[link_type] += 1
+
+    return {
+        "links": links,
+        "strong_links": sum(1 for link in links if link["strength"] == "strong"),
+        "moderate_links": sum(1 for link in links if link["strength"] == "moderate"),
+        "weak_links": sum(1 for link in links if link["strength"] == "weak"),
+        "candidate_count": len(candidates),
+        "supported_candidate_count": len(links),
+        "link_types": dict(sorted(type_counts.items())),
+        "link_candidates": _compact_candidates_for_llm(candidates),
+    }
+
+
+def _normalise_entity(field: str, value: object) -> str:
+    text = _normalise_text(value)
+    if not text:
+        return ""
+
+    if field == "contact_info":
+        return _normalise_contact(text)
+
+    if field in {"people", "organisations", "locations"}:
+        return re.sub(r"[^\w\s&.-]", "", text.casefold()).strip()
+
+    return text.casefold()
+
+
+def _normalise_contact(value: str) -> str:
+    text = value.strip().casefold()
+    if _EMAIL_RE.match(text):
+        return text
+
+    if _URL_RE.match(text):
+        return text.removeprefix("http://").removeprefix("https://").rstrip("/")
+
+    digits = _NON_DIGIT_RE.sub("", text)
+    if 7 <= len(digits) <= 15:
+        return digits[-10:] if len(digits) > 10 else digits
+
+    return re.sub(r"\s+", "", text)
+
+
+def _shared_display_values(values_a: list[str], values_b: list[str]) -> list[str]:
+    combined = values_a + values_b
+    cleaned = []
+    seen = set()
+    for value in combined:
+        text = _normalise_text(value)
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            cleaned.append(text)
+    return cleaned
+
+
+def _strength_from_score(score: float, supports: list[dict]) -> str:
+    support_types = {support["type"] for support in supports}
+    has_contact = "shared_contact" in support_types
+    has_temporal = "temporal_overlap" in support_types
+    has_location = "shared_location" in support_types
+
+    if score >= 7.5 or (has_contact and (len(support_types) > 1 or has_temporal)):
+        return "strong"
+    if score >= 4.0 or (has_location and has_temporal):
+        return "moderate"
+    return "weak"
+
+
+def _confidence_from_score(score: float, supports: list[dict]) -> str:
+    if score >= 7.5 or len(supports) >= 3:
+        return "high"
+    if score >= 4.0 or len(supports) >= 2:
+        return "medium"
+    return "low"
+
+
+def _cap_strength_by_support(strength: str, candidate: dict) -> str:
+    suggested = candidate["suggested_strength"]
+    order = {"weak": 0, "moderate": 1, "strong": 2}
+    if order[strength] > order[suggested]:
+        return suggested
+    return strength
+
+
+def _reason_hint(supports: list[dict]) -> str:
+    if not supports:
+        return "Evidence items share deterministic support."
+
+    ordered = sorted(supports, key=lambda s: -float(s.get("score", 0)))
+    hints = [support["reason_hint"] for support in ordered[:3]]
+    return " ".join(hints)
+
+
+def _dedupe_supports(supports: list[dict]) -> list[dict]:
+    unique = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for support in supports:
+        key = (
+            support.get("type", ""),
+            support.get("normalised_value", ""),
+            tuple(sorted(str(v).casefold() for v in support.get("shared_values", []))),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(support)
+    return unique
+
+
+def _dedupe_provenance(items: list[dict]) -> list[dict]:
+    unique = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        identity = (
+            str(item.get("evidence_id", "")),
+            str(item.get("field", "")),
+            str(item.get("value", "")).casefold(),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(item)
+    return unique
+
+
+def _clean_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+
+    cleaned = []
+    seen = set()
+    for value in values:
+        text = _normalise_text(value)
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            cleaned.append(text)
+    return cleaned
+
+
+def _normalise_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split()).strip()
+
+
+def _pair_key(a: str, b: str) -> tuple[str, str]:
+    first, second = sorted((str(a), str(b)))
+    return first, second
 
 
 async def _set_status(investigation_id: str, agent_id: str, status: str) -> None:
@@ -129,10 +711,20 @@ async def _append_line(investigation_id: str, agent_id: str, line: dict) -> None
 
 
 async def _complete(
-    investigation_id: str, agent_id: str,
-    lines: list[dict], summary: list[str], output: dict,
+    investigation_id: str,
+    agent_id: str,
+    lines: list[dict],
+    summary: list[str],
+    output: dict,
 ) -> None:
     await collections.agent_runs().update_one(
         {"investigation_id": investigation_id, "agent_id": agent_id},
-        {"$set": {"status": "done", "summary": summary, "output": output, "updated_at": utcnow()}},
+        {
+            "$set": {
+                "status": "done",
+                "summary": summary,
+                "output": output,
+                "updated_at": utcnow(),
+            }
+        },
     )

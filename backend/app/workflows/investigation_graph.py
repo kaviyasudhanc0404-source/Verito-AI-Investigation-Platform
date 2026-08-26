@@ -150,7 +150,10 @@ async def run_investigation_pipeline(
         await emit("agent_started", {"agent_id": "linker"})
         try:
             output = await evidence_linker.run(
-                s["investigation_id"], emit, s["analyzer_output"]
+                s["investigation_id"],
+                emit,
+                s["analyzer_output"],
+                s["timeline_output"],
             )
             return {**s, "linker_output": output}
         except Exception as e:
@@ -164,7 +167,11 @@ async def run_investigation_pipeline(
         await emit("agent_started", {"agent_id": "subject"})
         try:
             output = await subject_analyzer.run(
-                s["investigation_id"], emit, s["analyzer_output"]
+                s["investigation_id"],
+                emit,
+                s["analyzer_output"],
+                s["timeline_output"],
+                s["linker_output"],
             )
             return {**s, "subject_output": output}
         except Exception as e:
