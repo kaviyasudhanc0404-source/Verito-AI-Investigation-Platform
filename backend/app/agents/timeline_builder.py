@@ -17,7 +17,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 from app.database import collections
-from app.services.llm_service import chat_completion_json
+from app.services.llm_service import (
+    ContextTooLargeError,
+    chat_completion_json,
+    emit_llm_failure_telemetry,
+)
+from app.utils.context_budget import (
+    estimate_tokens,
+    fit_items_by_tokens,
+    get_token_budget,
+    validate_payload,
+)
 from app.utils.datetime_utils import utcnow
 
 Emitter = Callable[[str, dict], Awaitable[None]]
@@ -50,8 +60,11 @@ Return JSON:
 
 _VALID_CLASSIFICATIONS = {"FACT", "INFERRED", "UNCONFIRMED"}
 _VALID_CONFIDENCE = {"high", "medium", "low"}
-_MAX_CANDIDATES_FOR_LLM = 80
+_DATE_TYPES = {"EVENT", "DOCUMENT", "REFERENCE", "METADATA", "AMBIGUOUS"}
+# No hard candidate cap — batched synthesis handles any count
 _MAX_TEXT_SNIPPET_CHARS = 280
+_SYNTHESIS_OUTPUT_RESERVE = 2000
+_ENVELOPE_TOKENS = 60
 
 _ISO_DATE_RE = re.compile(
     r"\b(?P<year>20\d{2}|19\d{2})-(?P<month>0?[1-9]|1[0-2])-(?P<day>0?[1-9]|[12]\d|3[01])\b"
@@ -130,34 +143,81 @@ async def run(investigation_id: str, emit: Emitter, analyzer_output: dict) -> di
     if not candidates:
         output = _empty_output()
         await add_line("warn", "No temporal anchors found in the evidence.")
-        await _complete(investigation_id, agent_id, lines, ["No timeline events"], output)
-        await emit("agent_completed", {"agent_id": agent_id})
+        await _complete(investigation_id, agent_id, lines, ["No timeline events"], output, status="completed_with_warnings")
+        await emit("agent_completed_with_warnings", {"agent_id": agent_id})
         return output
 
-    compact_candidates = _compact_candidates_for_llm(candidates)
-    await add_line("scan", "Synthesising timeline from compact candidates...")
+    await add_line("scan", "Synthesising timeline from candidates (batch synthesis)...")
 
-    try:
-        result = await chat_completion_json(
-            messages=[
+    # Batch synthesis: split candidates into token-safe batches, merge results.
+    # Never discards candidates merely because there are many — batching handles them.
+    budget = get_token_budget(output_reserve=_SYNTHESIS_OUTPUT_RESERVE)
+    compact_all = _compact_candidates_for_llm(candidates)
+    batches = _split_candidate_batches(compact_all, budget=budget)
+    await add_line("info", f"Timeline synthesis: {len(compact_all)} compact candidates → {len(batches)} batch(es).")
+
+    all_events: list[dict] = []
+    synthesis_failed = False
+    for batch_num, batch in enumerate(batches, start=1):
+        try:
+            user_content = (
+                "Timeline candidates with provenance:\n"
+                f"{json.dumps(batch, separators=(',', ':'))}"
+            )
+            messages = [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
+                {"role": "user", "content": user_content},
+            ]
+            max_out = _SYNTHESIS_OUTPUT_RESERVE
+            validation = validate_payload(messages, max_output_tokens=max_out, budget=budget)
+            if not validation.fits:
+                # Split batch further if still too large
+                sub_batches = _split_candidate_batches(batch, budget=budget)
+                for sub in sub_batches:
+                    sub_content = (
                         "Timeline candidates with provenance:\n"
-                        f"{json.dumps(compact_candidates, separators=(',', ':'))}"
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_tokens=4096,
-        )
-    except Exception as exc:
-        await add_line("warn", f"Timeline synthesis failed: {str(exc)[:80]}")
-        result = _fallback_timeline(candidates)
+                        f"{json.dumps(sub, separators=(',', ':'))}"
+                    )
+                    sub_msgs = [
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": sub_content},
+                    ]
+                    sub_result = await chat_completion_json(sub_msgs, temperature=0.1, max_tokens=max_out)
+                    all_events.extend(sub_result.get("events", []) if isinstance(sub_result, dict) else [])
+                continue
+
+            result = await chat_completion_json(messages, temperature=0.1, max_tokens=max_out)
+            all_events.extend(result.get("events", []) if isinstance(result, dict) else [])
+
+        except (ContextTooLargeError, Exception) as exc:
+            is_413 = isinstance(exc, ContextTooLargeError)
+            code = 413 if is_413 else (400 if "400" in str(exc) or "json" in str(exc).lower() else "unknown")
+            category = "context_too_large" if is_413 else ("json_validation" if code == 400 else "unknown")
+            estimated_input = estimate_tokens(json.dumps(batch, separators=(',', ':')))
+            emit_llm_failure_telemetry(
+                agent_name="timeline_builder",
+                error_code=code,
+                error_category=category,
+                estimated_input_tokens=estimated_input,
+                requested_output_tokens=_SYNTHESIS_OUTPUT_RESERVE,
+                payload_size_chars=len(json.dumps(batch, separators=(',', ':'))),
+                attempt_number=1,
+                batch_number=batch_num,
+                batch_total=len(batches),
+                evidence_ids=list({c.get("evidence_id", "") for c in batch}),
+                was_retried=False,
+                retry_action=None,
+                fallback_action="deterministic_event_extraction",
+                original_message=getattr(exc, 'original_message', str(exc)),
+            )
+            synthesis_failed = True
+            await add_line("warn", f"Timeline batch {batch_num} synthesis failed — using fallback.")
+            fallback = _fallback_timeline([c for c in candidates if c.get("evidence_id") in
+                                           {b.get("evidence_id") for b in batch}])
+            all_events.extend(fallback.get("events", []))
 
     events = _validate_and_sort_events(
-        result.get("events", []),
+        all_events,
         candidates=candidates,
         valid_evidence_ids=evidence_ids,
     )
@@ -188,8 +248,12 @@ async def run(investigation_id: str, emit: Emitter, analyzer_output: dict) -> di
         f"Window: {time_window}" if time_window != "Unknown" else "Timeline window unknown",
     ]
 
-    await _complete(investigation_id, agent_id, lines, summary, output)
-    await emit("agent_completed", {"agent_id": agent_id})
+    status = "completed_with_warnings" if synthesis_failed else "done"
+    await _complete(investigation_id, agent_id, lines, summary, output, status=status)
+    await emit(
+        "agent_completed_with_warnings" if status == "completed_with_warnings" else "agent_completed",
+        {"agent_id": agent_id},
+    )
     return output
 
 
@@ -221,10 +285,12 @@ def _build_timeline_candidates(evidence_docs: list[dict], analyzer_output: dict)
         content = _normalise_text(ev.get("content", ""))
         bucket = entities_by_evidence.get(evidence_id, {})
 
-        date_mentions = _mentions_from_analyzer(bucket.get("dates", []), "dates")
-        date_mentions.extend(_extract_date_mentions(content))
-        time_mentions = _mentions_from_analyzer(bucket.get("times", []), "times")
-        time_mentions.extend(_extract_time_mentions(content))
+        analyzer_date_mentions = _mentions_from_analyzer(bucket.get("dates", []), "dates")
+        regex_date_mentions = _extract_date_mentions(content)
+        date_mentions = _merge_date_mentions(analyzer_date_mentions, regex_date_mentions)
+        time_mentions = _extract_time_mentions(content)
+        if not time_mentions:
+            time_mentions = _mentions_from_analyzer(bucket.get("times", []), "times")
 
         date_mentions = _dedupe_mentions(date_mentions)
         time_mentions = _dedupe_mentions(time_mentions)
@@ -233,7 +299,7 @@ def _build_timeline_candidates(evidence_docs: list[dict], analyzer_output: dict)
         snippet = _snippet(content)
 
         for date_mention in date_mentions[:8]:
-            times = time_mentions[:5] or [None]
+            times = _matching_time_mentions(date_mention, time_mentions) or [None]
             for time_mention in times:
                 candidate = _candidate_from_mentions(
                     evidence_id=evidence_id,
@@ -272,6 +338,24 @@ def _mentions_from_analyzer(values: object, field: str) -> list[dict]:
     return mentions
 
 
+def _merge_date_mentions(analyzer_mentions: list[dict], regex_mentions: list[dict]) -> list[dict]:
+    if not regex_mentions:
+        return analyzer_mentions
+    analyzer_by_text = {
+        _normalise_text(item.get("text")).casefold(): item
+        for item in analyzer_mentions
+    }
+    merged = []
+    for mention in regex_mentions:
+        key = _normalise_text(mention.get("text")).casefold()
+        analyzer_item = analyzer_by_text.get(key)
+        if analyzer_item:
+            merged.append({**mention, "source": "analyzer", "field": analyzer_item.get("field", "dates")})
+        else:
+            merged.append(mention)
+    return merged
+
+
 def _extract_date_mentions(text: str) -> list[dict]:
     mentions: list[dict] = []
     for pattern_name, pattern in (
@@ -305,6 +389,31 @@ def _extract_time_mentions(text: str) -> list[dict]:
     return mentions
 
 
+def _matching_time_mentions(date_mention: dict, time_mentions: list[dict]) -> list[dict]:
+    if not time_mentions:
+        return []
+
+    date_excerpt = _normalise_text(date_mention.get("excerpt"))
+    if not date_excerpt:
+        return []
+
+    matches = []
+    for time_mention in time_mentions:
+        time_excerpt = _normalise_text(time_mention.get("excerpt"))
+        time_text = _normalise_text(time_mention.get("text"))
+        if not time_text:
+            continue
+        if time_text in date_excerpt or (time_excerpt and _excerpts_overlap(date_excerpt, time_excerpt)):
+            matches.append(time_mention)
+    return matches[:2]
+
+
+def _excerpts_overlap(a: str, b: str) -> bool:
+    a_tokens = set(re.findall(r"[A-Za-z0-9-]{4,}", a.casefold()))
+    b_tokens = set(re.findall(r"[A-Za-z0-9-]{4,}", b.casefold()))
+    return len(a_tokens.intersection(b_tokens)) >= 3
+
+
 def _candidate_from_mentions(
     *,
     evidence_id: str,
@@ -324,6 +433,19 @@ def _candidate_from_mentions(
     if not ambiguous and date_parse.get("date"):
         sort_time = _combine_date_time(date_parse["date"], time_parse)
 
+    # Same-context invariant: date and time must come from the same record/sentence.
+    # _matching_time_mentions() already enforces this via excerpt overlap.
+    # We record same_context_verified = True only when a time is matched from the
+    # same excerpt as the date — never combined across different records.
+    same_context_verified = time_mention is not None
+
+    # Date-type classification: classify the role of this date in the evidence.
+    date_type = _classify_date_type(
+        date_mention=date_mention,
+        snippet=snippet,
+        statements=statements,
+    )
+
     return {
         "evidence_id": evidence_id,
         "filename": filename,
@@ -334,6 +456,8 @@ def _candidate_from_mentions(
         "timezone": time_parse.get("timezone"),
         "ambiguous": ambiguous,
         "ambiguity_reason": ambiguity_reason,
+        "same_context_verified": same_context_verified,
+        "date_type": date_type,
         "statements": statements,
         "findings": findings,
         "snippet": snippet,
@@ -361,8 +485,9 @@ def _candidate_from_mentions(
 
 
 def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
+    """Convert candidates to compact LLM-friendly format. Does NOT truncate."""
     compact = []
-    for index, candidate in enumerate(candidates[:_MAX_CANDIDATES_FOR_LLM], start=1):
+    for index, candidate in enumerate(candidates, start=1):
         compact.append(
             {
                 "candidate_id": f"T-{index:03d}",
@@ -372,21 +497,90 @@ def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
                 "time_text": candidate["time_text"],
                 "sort_time": candidate["sort_time"],
                 "ambiguous": candidate["ambiguous"],
-                "ambiguity_reason": candidate["ambiguity_reason"],
-                "statements": candidate["statements"],
-                "findings": candidate["findings"],
-                "snippet": candidate["snippet"],
-                "provenance": candidate["provenance"],
+                "ambiguity_reason": candidate.get("ambiguity_reason"),
+                "same_context_verified": candidate.get("same_context_verified", False),
+                "date_type": candidate.get("date_type", "AMBIGUOUS"),
+                "statements": candidate.get("statements", []),
+                "findings": candidate.get("findings", []),
+                "snippet": candidate.get("snippet", ""),
             }
         )
-    return compact
+    return compact  # Splitting is handled by _split_candidate_batches
+
+
+def _split_candidate_batches(
+    compact_candidates: list[dict],
+    *,
+    budget: object,
+) -> list[list[dict]]:
+    """Split compact candidates into token-safe batches for batch synthesis.
+
+    Handles any number of candidates — never discards because count is high.
+    """
+    system_tokens = estimate_tokens(_SYSTEM_PROMPT)
+    envelope_tokens = _ENVELOPE_TOKENS
+    available = budget.effective_input - system_tokens - envelope_tokens  # type: ignore[attr-defined]
+    available = max(available, 200)
+
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    current_tokens = 0
+
+    for item in compact_candidates:
+        item_tokens = estimate_tokens(json.dumps(item, separators=(',', ':')))
+        if current and current_tokens + item_tokens > available:
+            batches.append(current)
+            current, current_tokens = [], 0
+        current.append(item)
+        current_tokens += item_tokens
+
+    if current:
+        batches.append(current)
+    return batches or [[]]
+
+
+def _classify_date_type(
+    *,
+    date_mention: dict,
+    snippet: str,
+    statements: list[str],
+) -> str:
+    """Classify the temporal role of a date in the evidence.
+
+    Returns one of: EVENT | DOCUMENT | REFERENCE | METADATA | AMBIGUOUS
+
+    EVENT    — date describes something that happened (an action, transaction, meeting)
+    DOCUMENT — date is a document creation/submission/filing date
+    REFERENCE — date is cited as a past or future reference point
+    METADATA — date is file metadata (created_at, modified_at, accessed_at)
+    AMBIGUOUS — cannot determine from context signals
+    """
+    context = " ".join(filter(None, [snippet, *statements])).lower()
+    field = str(date_mention.get("field", "")).lower()
+    source = str(date_mention.get("source", "")).lower()
+
+    _METADATA_WORDS = ("created", "modified", "accessed", "uploaded", "metadata", "file date", "recorded")
+    _DOCUMENT_WORDS = ("dated", "signed", "issued", "filed", "submitted", "document date", "report date", "letter dated")
+    _REFERENCE_WORDS = ("as of", "prior to", "before", "after", "since", "by", "effective", "reference date")
+    _EVENT_WORDS = ("on", "occurred", "happened", "took place", "meeting", "transaction",
+                    "payment", "transfer", "received", "sent", "arrested", "purchased", "sold")
+
+    if any(w in context for w in _METADATA_WORDS):
+        return "METADATA"
+    if any(w in context for w in _DOCUMENT_WORDS):
+        return "DOCUMENT"
+    if any(w in context for w in _EVENT_WORDS):
+        return "EVENT"
+    if any(w in context for w in _REFERENCE_WORDS):
+        return "REFERENCE"
+    return "AMBIGUOUS"
 
 
 def _fallback_timeline(candidates: list[dict]) -> dict:
     events = []
     for candidate in candidates:
         text_parts = candidate.get("statements") or candidate.get("findings") or []
-        event_text = text_parts[0] if text_parts else f"Temporal reference in {candidate['filename']}"
+        event_text = text_parts[0] if text_parts else _event_text_from_candidate(candidate)
         classification = "UNCONFIRMED" if candidate.get("ambiguous") else "FACT"
         confidence = "low" if candidate.get("ambiguous") else "medium"
         events.append(
@@ -400,6 +594,35 @@ def _fallback_timeline(candidates: list[dict]) -> dict:
             }
         )
     return {"events": events, "time_window": "Unknown"}
+
+
+def _event_text_from_candidate(candidate: dict) -> str:
+    date_text = _normalise_text(candidate.get("date_text"))
+    time_text = _normalise_text(candidate.get("time_text"))
+    for item in candidate.get("provenance", []):
+        if not isinstance(item, dict):
+            continue
+        excerpt = _normalise_text(item.get("excerpt"))
+        if excerpt and excerpt not in {date_text, time_text}:
+            return _trim_event_text(excerpt, date_text, time_text)
+    snippet = _normalise_text(candidate.get("snippet"))
+    if snippet:
+        return _trim_event_text(snippet, date_text, time_text)
+    return f"Date/time reference {date_text} {time_text}".strip()
+
+
+def _trim_event_text(text: str, date_text: str, time_text: str) -> str:
+    clean = _normalise_text(text)
+    anchor = date_text or time_text
+    if anchor:
+        index = clean.casefold().find(anchor.casefold())
+        if index >= 0:
+            left = max(0, index - 90)
+            right = min(len(clean), index + len(anchor) + 110)
+            clean = clean[left:right].strip(" ,.;:-")
+    if len(clean) > 180:
+        clean = clean[:177].rstrip() + "..."
+    return clean or "Temporal evidence reference"
 
 
 def _validate_and_sort_events(
@@ -772,12 +995,13 @@ async def _complete(
     lines: list[dict],
     summary: list[str],
     output: dict,
+    status: str = "done",
 ) -> None:
     await collections.agent_runs().update_one(
         {"investigation_id": investigation_id, "agent_id": agent_id},
         {
             "$set": {
-                "status": "done",
+                "status": status,
                 "summary": summary,
                 "output": output,
                 "updated_at": utcnow(),

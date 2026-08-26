@@ -11,7 +11,7 @@ from typing import AsyncIterator
 from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import StreamingResponse
 
-from app.core.exceptions import NotFoundException, ForbiddenException
+from app.core.exceptions import NotFoundException, ForbiddenException, ServiceException
 from app.database import collections
 from app.dependencies.auth import get_current_user
 from app.schemas.agent import AgentRunResponse, AgentLineResponse
@@ -205,15 +205,20 @@ async def delete_investigation(
     """Delete an investigation and all its related data."""
     inv = await _check_ownership(investigation_id, current_user["_id"])
 
-    # Delete vectors from Qdrant Cloud before Mongo metadata is removed.
+    # Delete vectors from Qdrant Cloud before Mongo metadata is removed. If this
+    # fails, keep Mongo metadata so the user can retry and we do not orphan paid
+    # vector storage that is harder to target later.
     try:
         await asyncio.to_thread(
             vector_store.delete_investigation_chunks,
             investigation_id,
             inv["user_id"],
         )
-    except Exception:
-        pass  # Non-fatal if Qdrant cleanup fails
+    except Exception as exc:
+        raise ServiceException(
+            "Could not delete this investigation's Qdrant chunks. "
+            "No MongoDB records were removed; please retry deletion."
+        ) from exc
 
     await investigation_service.delete_investigation(investigation_id, current_user["_id"])
 

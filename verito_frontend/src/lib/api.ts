@@ -181,7 +181,7 @@ export interface EvidenceItemResponse {
 
 export interface AgentRunResponse {
   id: string;
-  status: "idle" | "running" | "done" | "failed";
+  status: "idle" | "running" | "done" | "completed_with_warnings" | "failed" | "blocked";
   lines: { kind: string; text: string }[];
   summary: string[];
 }

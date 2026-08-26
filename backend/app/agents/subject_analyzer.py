@@ -15,7 +15,16 @@ import re
 from typing import Awaitable, Callable
 
 from app.database import collections
-from app.services.llm_service import chat_completion_json
+from app.services.llm_service import (
+    ContextTooLargeError,
+    chat_completion_json,
+    emit_llm_failure_telemetry,
+)
+from app.utils.context_budget import (
+    estimate_tokens,
+    fit_items_by_tokens,
+    get_token_budget,
+)
 from app.utils.datetime_utils import utcnow
 
 Emitter = Callable[[str, dict], Awaitable[None]]
@@ -46,6 +55,7 @@ Return JSON:
 }"""
 
 _MAX_CANDIDATES_FOR_LLM = 60
+_SYNTHESIS_OUTPUT_RESERVE = 1500
 _MAX_TEXT_SNIPPET_CHARS = 220
 _MAX_CONTEXT_ITEMS = 8
 _TITLE_RE = re.compile(r"^(mr|mrs|ms|miss|dr|prof|sir|madam)\.?\s+", re.IGNORECASE)
@@ -99,28 +109,108 @@ async def run(
     if not candidates:
         output = _empty_output()
         await add_line("warn", "No persons identified in the evidence.")
-        await _complete(investigation_id, agent_id, lines, ["No subjects identified"], output)
-        await emit("agent_completed", {"agent_id": agent_id})
+        await _complete(investigation_id, agent_id, lines, ["No subjects identified"], output, status="completed_with_warnings")
+        await emit("agent_completed_with_warnings", {"agent_id": agent_id})
         return output
 
-    compact_candidates = _compact_candidates_for_llm(candidates)
+    budget = get_token_budget(output_reserve=_SYNTHESIS_OUTPUT_RESERVE)
+    compact_candidates = _compact_candidates_for_llm(candidates, budget=budget)
+    evidence_ids_list = list({r for c in candidates for r in c.get("evidence_refs", [])})
+    user_content = (
+        "Subject candidates with deterministic scoring:\n"
+        f"{json.dumps(compact_candidates, separators=(',', ':'))}"
+    )
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    max_out = _SYNTHESIS_OUTPUT_RESERVE
+    estimated_input = estimate_tokens(user_content)
+
+    await add_line("scan", "Synthesising subject notes from filtered context...")
+
+    synthesis: dict = {}
     try:
-        await add_line("scan", "Synthesising subject notes from filtered context...")
-        synthesis = await chat_completion_json(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Subject candidates with deterministic scoring:\n"
-                        f"{json.dumps(compact_candidates, separators=(',', ':'))}"
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_tokens=2500,
+        synthesis = await chat_completion_json(messages, temperature=0.1, max_tokens=max_out)
+
+    except ContextTooLargeError as exc:
+        emit_llm_failure_telemetry(
+            agent_name="subject_analyzer",
+            error_code=413, error_category="context_too_large",
+            estimated_input_tokens=estimated_input,
+            requested_output_tokens=max_out, payload_size_chars=len(user_content),
+            attempt_number=1, evidence_ids=evidence_ids_list,
+            was_retried=True, retry_action="reduce_context",
+            fallback_action=None, original_message=exc.original_message,
         )
+        reduced = compact_candidates[:max(6, len(compact_candidates) // 2)]
+        red_content = (
+            "Subject candidates with deterministic scoring:\n"
+            f"{json.dumps(reduced, separators=(',', ':'))}"
+        )
+        try:
+            synthesis = await chat_completion_json(
+                [{"role": "system", "content": _SYSTEM_PROMPT},
+                 {"role": "user", "content": red_content}],
+                temperature=0.1, max_tokens=max_out,
+            )
+        except Exception as exc2:
+            emit_llm_failure_telemetry(
+                agent_name="subject_analyzer",
+                error_code="unknown", error_category="unknown",
+                estimated_input_tokens=estimate_tokens(red_content),
+                requested_output_tokens=max_out, payload_size_chars=len(red_content),
+                attempt_number=2, evidence_ids=evidence_ids_list,
+                was_retried=False, retry_action=None,
+                fallback_action="fallback_synthesis", original_message=str(exc2),
+            )
+            await add_line("warn", f"Subject note synthesis failed after retry: {str(exc2)[:80]}")
+            synthesis = _fallback_synthesis(candidates)
+
+    except ValueError as exc:
+        emit_llm_failure_telemetry(
+            agent_name="subject_analyzer",
+            error_code=400, error_category="json_validation",
+            estimated_input_tokens=estimated_input,
+            requested_output_tokens=max_out, payload_size_chars=len(user_content),
+            attempt_number=1, evidence_ids=evidence_ids_list,
+            was_retried=True, retry_action="reduce_batch_size",
+            fallback_action=None, original_message=str(exc),
+        )
+        reduced = compact_candidates[:max(6, len(compact_candidates) // 2)]
+        red_content = (
+            "Subject candidates with deterministic scoring:\n"
+            f"{json.dumps(reduced, separators=(',', ':'))}"
+        )
+        try:
+            synthesis = await chat_completion_json(
+                [{"role": "system", "content": _SYSTEM_PROMPT},
+                 {"role": "user", "content": red_content}],
+                temperature=0.1, max_tokens=max_out,
+            )
+        except Exception as exc2:
+            emit_llm_failure_telemetry(
+                agent_name="subject_analyzer",
+                error_code="unknown", error_category="unknown",
+                estimated_input_tokens=estimate_tokens(red_content),
+                requested_output_tokens=max_out, payload_size_chars=len(red_content),
+                attempt_number=2, evidence_ids=evidence_ids_list,
+                was_retried=False, retry_action=None,
+                fallback_action="fallback_synthesis", original_message=str(exc2),
+            )
+            await add_line("warn", f"Subject note synthesis failed after retry: {str(exc2)[:80]}")
+            synthesis = _fallback_synthesis(candidates)
+
     except Exception as exc:
+        emit_llm_failure_telemetry(
+            agent_name="subject_analyzer",
+            error_code="unknown", error_category="unknown",
+            estimated_input_tokens=estimated_input,
+            requested_output_tokens=max_out, payload_size_chars=len(user_content),
+            attempt_number=1, evidence_ids=evidence_ids_list,
+            was_retried=False, retry_action=None,
+            fallback_action="fallback_synthesis", original_message=str(exc),
+        )
         await add_line("warn", f"Subject note synthesis failed: {str(exc)[:80]}")
         synthesis = _fallback_synthesis(candidates)
 
@@ -161,8 +251,12 @@ async def run(
         f"{output['high_involvement_count']} high representation",
     ]
 
-    await _complete(investigation_id, agent_id, lines, summary, output)
-    await emit("agent_completed", {"agent_id": agent_id})
+    status = "completed_with_warnings" if output["subject_count"] == 0 else "done"
+    await _complete(investigation_id, agent_id, lines, summary, output, status=status)
+    await emit(
+        "agent_completed_with_warnings" if status == "completed_with_warnings" else "agent_completed",
+        {"agent_id": agent_id},
+    )
     return output
 
 
@@ -355,9 +449,13 @@ def _link_refs_by_subject(
     return refs_by_subject
 
 
-def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
+def _compact_candidates_for_llm(candidates: list[dict], *, budget: object | None = None) -> list[dict]:
+    from app.utils.context_budget import get_token_budget as _get_budget, estimate_tokens as _est
+    if budget is None:
+        budget = _get_budget(output_reserve=_SYNTHESIS_OUTPUT_RESERVE)
+
     compact = []
-    for candidate in candidates[:_MAX_CANDIDATES_FOR_LLM]:
+    for candidate in candidates:
         compact.append(
             {
                 "candidate_id": candidate["candidate_id"],
@@ -376,7 +474,14 @@ def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
                 "provenance": candidate["provenance"][:_MAX_CONTEXT_ITEMS],
             }
         )
-    return compact
+    system_tokens = _est(_SYSTEM_PROMPT)
+    available = budget.effective_input - system_tokens - 60  # type: ignore[attr-defined]
+    fitted = fit_items_by_tokens(
+        compact,
+        budget_tokens=max(available, 500),
+        min_items=min(8, len(compact)),
+    )
+    return fitted[:_MAX_CANDIDATES_FOR_LLM]
 
 
 def _fallback_synthesis(candidates: list[dict]) -> dict:
@@ -721,12 +826,13 @@ async def _complete(
     lines: list[dict],
     summary: list[str],
     output: dict,
+    status: str = "done",
 ) -> None:
     await collections.agent_runs().update_one(
         {"investigation_id": investigation_id, "agent_id": agent_id},
         {
             "$set": {
-                "status": "done",
+                "status": status,
                 "summary": summary,
                 "output": output,
                 "updated_at": utcnow(),

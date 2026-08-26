@@ -172,3 +172,90 @@ async def test_delete_investigation_cleans_qdrant_with_user_filter():
     assert response.status_code == 204
     qdrant_delete.assert_called_once_with("inv_abc123", "usr_owner")
     mongo_delete.assert_awaited_once_with("inv_abc123", "usr_owner")
+
+
+@pytest.mark.asyncio
+async def test_delete_investigation_does_not_orphan_qdrant_on_failure():
+    """If Qdrant cleanup fails, Mongo metadata remains so deletion can be retried."""
+    mock_user = {"_id": "usr_owner", "email": "owner@verito.ai", "name": "Owner"}
+    mock_inv = {
+        "_id": "inv_abc123",
+        "user_id": "usr_owner",
+        "title": "Case",
+        "prompt": "...",
+        "status": "complete",
+    }
+
+    app.dependency_overrides[get_current_user] = lambda: mock_user
+    try:
+        with (
+            patch(
+                "app.services.investigation_service.get_investigation",
+                new=AsyncMock(return_value=mock_inv),
+            ),
+            patch(
+                "app.services.vector_store.delete_investigation_chunks",
+                new=MagicMock(side_effect=RuntimeError("qdrant unavailable")),
+            ) as qdrant_delete,
+            patch(
+                "app.services.investigation_service.delete_investigation",
+                new=AsyncMock(),
+            ) as mongo_delete,
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                response = await ac.delete(
+                    "/api/investigations/inv_abc123",
+                    headers=_make_auth_headers(),
+                )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 500
+    qdrant_delete.assert_called_once_with("inv_abc123", "usr_owner")
+    mongo_delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_investigation_removes_only_selected_chat_mongo_artifacts():
+    """Mongo cleanup is scoped to the deleted investigation and user where available."""
+    from app.services import investigation_service
+
+    class FakeCursor:
+        async def to_list(self, length=None):
+            return []
+
+    investigations = MagicMock()
+    investigations.delete_one = AsyncMock()
+
+    evidence = MagicMock()
+    evidence.find.return_value = FakeCursor()
+    evidence.delete_many = AsyncMock()
+
+    agent_runs = MagicMock()
+    agent_runs.delete_many = AsyncMock()
+
+    reports = MagicMock()
+    reports.delete_many = AsyncMock()
+
+    chat_messages = MagicMock()
+    chat_messages.delete_many = AsyncMock()
+
+    with (
+        patch("app.services.investigation_service._delete_investigation_uploads"),
+        patch("app.database.collections.investigations", return_value=investigations),
+        patch("app.database.collections.evidence", return_value=evidence),
+        patch("app.database.collections.agent_runs", return_value=agent_runs),
+        patch("app.database.collections.reports", return_value=reports),
+        patch("app.database.collections.chat_messages", return_value=chat_messages),
+    ):
+        await investigation_service.delete_investigation("inv_keep_scope", "usr_owner")
+
+    scoped_user_filter = {"investigation_id": "inv_keep_scope", "user_id": "usr_owner"}
+    evidence.find.assert_called_once_with(scoped_user_filter)
+    investigations.delete_one.assert_awaited_once_with(
+        {"_id": "inv_keep_scope", "user_id": "usr_owner"}
+    )
+    evidence.delete_many.assert_awaited_once_with(scoped_user_filter)
+    agent_runs.delete_many.assert_awaited_once_with({"investigation_id": "inv_keep_scope"})
+    reports.delete_many.assert_awaited_once_with({"investigation_id": "inv_keep_scope"})
+    chat_messages.delete_many.assert_awaited_once_with(scoped_user_filter)

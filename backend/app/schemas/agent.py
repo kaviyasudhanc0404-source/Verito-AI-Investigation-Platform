@@ -10,13 +10,13 @@ from pydantic import BaseModel
 
 class AgentLineResponse(BaseModel):
     """Matches frontend AgentLine type."""
-    kind: Literal["info", "ok", "scan", "warn"]
+    kind: Literal["info", "ok", "scan", "warn", "error"]
     text: str
 
 
 class AgentRunResponse(BaseModel):
     """Matches frontend AgentRun type."""
     id: Literal["collector", "analyzer", "timeline", "linker", "subject", "report"]
-    status: Literal["idle", "running", "done", "failed"]
+    status: Literal["idle", "running", "done", "completed_with_warnings", "failed", "blocked"]
     lines: list[AgentLineResponse] = []
     summary: list[str] = []

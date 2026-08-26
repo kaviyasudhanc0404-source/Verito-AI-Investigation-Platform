@@ -1,7 +1,7 @@
 # VERITO — Evidence Collector Agent
 ### Agent 01 | Technical Reference Document
 
----
+
 
 ## What It Does
 

@@ -104,7 +104,19 @@ def _delete_investigation_uploads(user_id: str, investigation_id: str, evidence_
 
 async def delete_investigation(investigation_id: str, user_id: str) -> None:
     """
-    Delete an investigation and all related data from MongoDB.
+    Delete one user's investigation and all related MongoDB/disk data.
+
+    Per-investigation JSON/structured artifacts live in:
+      - evidence.content and evidence metadata
+      - agent_runs.output and progress lines
+      - reports validated/final report fields
+      - chat_messages follow-up history
+
+    The API route verifies ownership before calling this function. Collections
+    that also carry user_id are filtered by both fields; agent_runs/reports are
+    filtered by investigation_id because they are generated only after that
+    ownership check and do not currently store user_id.
+
     Note: Qdrant chunks are deleted separately in the API route.
     """
     evidence_docs = await collections.evidence().find(
@@ -113,7 +125,11 @@ async def delete_investigation(investigation_id: str, user_id: str) -> None:
     _delete_investigation_uploads(user_id, investigation_id, evidence_docs)
 
     await collections.investigations().delete_one({"_id": investigation_id, "user_id": user_id})
-    await collections.evidence().delete_many({"investigation_id": investigation_id})
+    await collections.evidence().delete_many(
+        {"investigation_id": investigation_id, "user_id": user_id}
+    )
     await collections.agent_runs().delete_many({"investigation_id": investigation_id})
-    await collections.reports().delete_one({"investigation_id": investigation_id})
-    await collections.chat_messages().delete_many({"investigation_id": investigation_id})
+    await collections.reports().delete_many({"investigation_id": investigation_id})
+    await collections.chat_messages().delete_many(
+        {"investigation_id": investigation_id, "user_id": user_id}
+    )

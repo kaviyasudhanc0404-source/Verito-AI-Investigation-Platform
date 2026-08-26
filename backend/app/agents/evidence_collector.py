@@ -103,6 +103,10 @@ def _parse_evidence(file_bytes: bytes, filename: str, file_type: str) -> str:
         from app.parsers.chat_parser import parse
         return parse(file_bytes, filename)
 
+    if file_type == "json":
+        from app.parsers.json_parser import parse
+        return parse(file_bytes, filename)
+
     # ── Archive ───────────────────────────────────────────────────────────────
     if file_type == "zip":
         from app.parsers.zip_extractor import parse
@@ -259,8 +263,10 @@ async def run(
         "failed_ids": failed_ids,
     }
 
-    await _complete(investigation_id, agent_id, lines, summary_lines, output)
-    await emit("agent_completed", {"agent_id": agent_id})
+    status = "completed_with_warnings" if failed_ids else "done"
+    await _complete(investigation_id, agent_id, lines, summary_lines, output, status=status)
+    event_name = "agent_completed_with_warnings" if failed_ids else "agent_completed"
+    await emit(event_name, {"agent_id": agent_id})
 
     return output
 
@@ -296,12 +302,13 @@ async def _complete(
     lines: list[dict],
     summary: list[str],
     output: dict,
+    status: str = "done",
 ) -> None:
     await collections.agent_runs().update_one(
         {"investigation_id": investigation_id, "agent_id": agent_id},
         {
             "$set": {
-                "status": "done",
+                "status": status,
                 "summary": summary,
                 "output": output,
                 "updated_at": utcnow(),

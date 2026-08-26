@@ -4,6 +4,9 @@ models/report.py
 MongoDB document model for the final investigation report.
 """
 
+from datetime import datetime
+from typing import Any, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -35,5 +38,9 @@ class ReportModel(BaseModel):
     connections: list[ConnectionEntry] = []
     persons: list[PersonEntry] = []
     unresolved: list[str] = []
+    report_version: Optional[str] = None
+    generated_at: Optional[datetime] = None
+    generation_status: Optional[str] = None
+    validated_report: dict[str, Any] = {}
 
     model_config = {"populate_by_name": True}

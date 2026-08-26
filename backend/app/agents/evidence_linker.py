@@ -18,7 +18,17 @@ from collections import defaultdict
 from typing import Awaitable, Callable
 
 from app.database import collections
-from app.services.llm_service import chat_completion_json
+from app.services.llm_service import (
+    ContextTooLargeError,
+    chat_completion_json,
+    emit_llm_failure_telemetry,
+)
+from app.utils.context_budget import (
+    estimate_tokens,
+    fit_items_by_tokens,
+    get_token_budget,
+    validate_payload,
+)
 from app.utils.datetime_utils import utcnow
 
 Emitter = Callable[[str, dict], Awaitable[None]]
@@ -49,6 +59,7 @@ Return JSON:
 
 _ENTITY_FIELDS = (
     "contact_info",
+    "identifiers",
     "people",
     "organisations",
     "locations",
@@ -57,6 +68,7 @@ _ENTITY_FIELDS = (
 )
 _FIELD_TYPE = {
     "contact_info": "shared_contact",
+    "identifiers": "shared_identifier",
     "people": "shared_person",
     "organisations": "shared_organisation",
     "locations": "shared_location",
@@ -65,6 +77,7 @@ _FIELD_TYPE = {
 }
 _FIELD_LABEL = {
     "contact_info": "contact detail",
+    "identifiers": "identifier",
     "people": "person",
     "organisations": "organisation",
     "locations": "location",
@@ -73,6 +86,7 @@ _FIELD_LABEL = {
 }
 _FIELD_SCORE = {
     "contact_info": 5.0,
+    "identifiers": 4.0,
     "people": 3.0,
     "organisations": 3.0,
     "locations": 2.0,
@@ -81,9 +95,23 @@ _FIELD_SCORE = {
 }
 _VALID_STRENGTHS = {"strong", "moderate", "weak"}
 _VALID_CONFIDENCE = {"high", "medium", "low"}
-_MAX_CANDIDATES_FOR_LLM = 60
+_MAX_CANDIDATES_FOR_LLM = 40      # Hard cap before token fitting
+_SYNTHESIS_OUTPUT_RESERVE = 1600  # Output tokens reserved for synthesis response
 _MAX_SHARED_VALUES_PER_SUPPORT = 6
 _MAX_PROVENANCE_ITEMS = 20
+
+# Generic terms that must not anchor a link on their own.
+# A link whose only support is one of these values is always downgraded.
+_GENERIC_STOPLIST = frozenset({
+    "mr", "mrs", "ms", "dr", "prof", "sir", "madam",
+    "unknown", "n/a", "na", "none", "null", "yes", "no",
+    "true", "false", "other", "misc", "various",
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "00:00", "12:00", "india", "usa", "us", "uk",
+})
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _URL_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
@@ -123,28 +151,117 @@ async def run(
     if not candidates:
         output = _empty_output()
         await add_line("warn", "No cross-evidence support was found.")
-        await _complete(investigation_id, agent_id, lines, ["No evidence links"], output)
-        await emit("agent_completed", {"agent_id": agent_id})
+        await _complete(investigation_id, agent_id, lines, ["No evidence links"], output, status="completed_with_warnings")
+        await emit("agent_completed_with_warnings", {"agent_id": agent_id})
         return output
 
-    compact_candidates = _compact_candidates_for_llm(candidates)
+    budget = get_token_budget(output_reserve=_SYNTHESIS_OUTPUT_RESERVE)
+    compact_candidates = _compact_candidates_for_llm(candidates, budget=budget)
+    evidence_ids_list = list({c["a"] for c in candidates} | {c["b"] for c in candidates})
+    estimated_input = estimate_tokens(json.dumps(compact_candidates, separators=(',', ':')))
+
+    await add_line("scan", "Synthesising supported links from candidates...")
+
+    user_content = (
+        "Deterministic link candidates:\n"
+        f"{json.dumps(compact_candidates, separators=(',', ':'))}"
+    )
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    max_out = _SYNTHESIS_OUTPUT_RESERVE
+
+    synthesis: dict = {}
     try:
-        await add_line("scan", "Synthesising supported links from candidates...")
-        synthesis = await chat_completion_json(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Deterministic link candidates:\n"
-                        f"{json.dumps(compact_candidates, separators=(',', ':'))}"
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_tokens=3500,
+        synthesis = await chat_completion_json(messages, temperature=0.1, max_tokens=max_out)
+
+    except ContextTooLargeError as exc:
+        emit_llm_failure_telemetry(
+            agent_name="evidence_linker",
+            error_code=413,
+            error_category="context_too_large",
+            estimated_input_tokens=estimated_input,
+            requested_output_tokens=max_out,
+            payload_size_chars=len(user_content),
+            attempt_number=1,
+            evidence_ids=evidence_ids_list,
+            was_retried=True,
+            retry_action="reduce_context",
+            fallback_action=None,
+            original_message=exc.original_message,
         )
+        # Drop lowest-score candidates until it fits, then retry once
+        reduced = compact_candidates[:max(8, len(compact_candidates) // 2)]
+        red_content = (
+            "Deterministic link candidates:\n"
+            f"{json.dumps(reduced, separators=(',', ':'))}"
+        )
+        try:
+            synthesis = await chat_completion_json(
+                [{"role": "system", "content": _SYSTEM_PROMPT},
+                 {"role": "user", "content": red_content}],
+                temperature=0.1, max_tokens=max_out,
+            )
+        except Exception as exc2:
+            emit_llm_failure_telemetry(
+                agent_name="evidence_linker",
+                error_code="unknown", error_category="unknown",
+                estimated_input_tokens=estimate_tokens(red_content),
+                requested_output_tokens=max_out, payload_size_chars=len(red_content),
+                attempt_number=2, evidence_ids=evidence_ids_list,
+                was_retried=False, retry_action=None,
+                fallback_action="fallback_synthesis",
+                original_message=str(exc2),
+            )
+            await add_line("warn", f"LLM link synthesis failed after retry: {str(exc2)[:80]}")
+            synthesis = _fallback_synthesis(candidates)
+
+    except ValueError as exc:
+        emit_llm_failure_telemetry(
+            agent_name="evidence_linker",
+            error_code=400, error_category="json_validation",
+            estimated_input_tokens=estimated_input,
+            requested_output_tokens=max_out, payload_size_chars=len(user_content),
+            attempt_number=1, evidence_ids=evidence_ids_list,
+            was_retried=True, retry_action="reduce_batch_size",
+            fallback_action=None, original_message=str(exc),
+        )
+        # Reduce to half candidates and retry once
+        reduced = compact_candidates[:max(8, len(compact_candidates) // 2)]
+        red_content = (
+            "Deterministic link candidates:\n"
+            f"{json.dumps(reduced, separators=(',', ':'))}"
+        )
+        try:
+            synthesis = await chat_completion_json(
+                [{"role": "system", "content": _SYSTEM_PROMPT},
+                 {"role": "user", "content": red_content}],
+                temperature=0.1, max_tokens=max_out,
+            )
+        except Exception as exc2:
+            emit_llm_failure_telemetry(
+                agent_name="evidence_linker",
+                error_code="unknown", error_category="unknown",
+                estimated_input_tokens=estimate_tokens(red_content),
+                requested_output_tokens=max_out, payload_size_chars=len(red_content),
+                attempt_number=2, evidence_ids=evidence_ids_list,
+                was_retried=False, retry_action=None,
+                fallback_action="fallback_synthesis", original_message=str(exc2),
+            )
+            await add_line("warn", f"LLM link synthesis failed after retry: {str(exc2)[:80]}")
+            synthesis = _fallback_synthesis(candidates)
+
     except Exception as exc:
+        emit_llm_failure_telemetry(
+            agent_name="evidence_linker",
+            error_code="unknown", error_category="unknown",
+            estimated_input_tokens=estimated_input,
+            requested_output_tokens=max_out, payload_size_chars=len(user_content),
+            attempt_number=1, evidence_ids=evidence_ids_list,
+            was_retried=False, retry_action=None,
+            fallback_action="fallback_synthesis", original_message=str(exc),
+        )
         await add_line("warn", f"LLM link synthesis failed: {str(exc)[:80]}")
         synthesis = _fallback_synthesis(candidates)
 
@@ -186,8 +303,12 @@ async def run(
         f"{output['weak_links']} weak link(s)",
     ]
 
-    await _complete(investigation_id, agent_id, lines, summary, output)
-    await emit("agent_completed", {"agent_id": agent_id})
+    status = "completed_with_warnings" if output["supported_candidate_count"] == 0 else "done"
+    await _complete(investigation_id, agent_id, lines, summary, output, status=status)
+    await emit(
+        "agent_completed_with_warnings" if status == "completed_with_warnings" else "agent_completed",
+        {"agent_id": agent_id},
+    )
     return output
 
 
@@ -426,32 +547,60 @@ def _candidate_from_supports(
     }
 
 
-def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
-    compact = []
-    for candidate in candidates[:_MAX_CANDIDATES_FOR_LLM]:
-        compact.append(
-            {
-                "candidate_id": candidate["candidate_id"],
-                "a": candidate["a"],
-                "b": candidate["b"],
-                "types": candidate["types"],
-                "score": candidate["score"],
-                "suggested_strength": candidate["suggested_strength"],
-                "suggested_confidence": candidate["suggested_confidence"],
-                "reason_hint": candidate["reason_hint"],
-                "supports": [
-                    {
-                        "type": support["type"],
-                        "field": support["field"],
-                        "shared_values": support["shared_values"],
-                        "uniqueness": support.get("uniqueness"),
-                        "reason_hint": support["reason_hint"],
-                    }
-                    for support in candidate["supports"][:8]
-                ],
-            }
-        )
-    return compact
+def _compact_candidates_for_llm(candidates: list[dict], *, budget: object | None = None) -> list[dict]:
+    """Build a minimal, token-safe candidate list for LLM synthesis.
+
+    Strips each candidate to only the 4 fields the LLM needs:
+      candidate_id, a, b, reason_hint
+    Generic-only candidates are filtered out before sending.
+    Hard-capped at _MAX_CANDIDATES_FOR_LLM before token fitting.
+    """
+    from app.utils.context_budget import get_token_budget as _get_budget
+    if budget is None:
+        budget = _get_budget(output_reserve=_SYNTHESIS_OUTPUT_RESERVE)
+
+    # Filter candidates whose only support values are generic terms
+    non_generic = [c for c in candidates if not _is_generic_only_candidate(c)]
+    if not non_generic:
+        non_generic = candidates  # Fallback: keep all if all are generic
+
+    # Sort by score descending, take top _MAX_CANDIDATES_FOR_LLM
+    top = sorted(non_generic, key=lambda c: -c["score"])[:_MAX_CANDIDATES_FOR_LLM]
+
+    # Strip each candidate to the minimum 4 fields the LLM needs
+    compact = [
+        {
+            "candidate_id": c["candidate_id"],
+            "a": c["a"],
+            "b": c["b"],
+            "reason_hint": c["reason_hint"],
+        }
+        for c in top
+    ]
+
+    # Token-safe fitting: never exceed effective_input budget
+    system_tokens = estimate_tokens(_SYSTEM_PROMPT)
+    available = budget.effective_input - system_tokens - 60  # type: ignore[attr-defined]
+    fitted = fit_items_by_tokens(
+        compact,
+        budget_tokens=max(available, 500),
+        min_items=min(8, len(compact)),
+    )
+    return fitted
+
+
+def _is_generic_only_candidate(candidate: dict) -> bool:
+    """Return True if all shared values for this candidate are generic terms.
+
+    A candidate passes through if ANY support value is NOT in the stoplist.
+    Only filter when every shared value across all supports is generic.
+    """
+    all_values: list[str] = []
+    for support in candidate.get("supports", []):
+        all_values.extend(v.strip().lower() for v in support.get("shared_values", []))
+    if not all_values:
+        return False  # No shared values — cannot judge, keep
+    return all(v in _GENERIC_STOPLIST for v in all_values)
 
 
 def _fallback_synthesis(candidates: list[dict]) -> dict:
@@ -565,6 +714,9 @@ def _normalise_entity(field: str, value: object) -> str:
     if field == "contact_info":
         return _normalise_contact(text)
 
+    if field == "identifiers":
+        return re.sub(r"[^a-z0-9-]", "", text.casefold())
+
     if field in {"people", "organisations", "locations"}:
         return re.sub(r"[^\w\s&.-]", "", text.casefold()).strip()
 
@@ -602,10 +754,13 @@ def _shared_display_values(values_a: list[str], values_b: list[str]) -> list[str
 def _strength_from_score(score: float, supports: list[dict]) -> str:
     support_types = {support["type"] for support in supports}
     has_contact = "shared_contact" in support_types
+    has_identifier = "shared_identifier" in support_types
     has_temporal = "temporal_overlap" in support_types
     has_location = "shared_location" in support_types
 
     if score >= 7.5 or (has_contact and (len(support_types) > 1 or has_temporal)):
+        return "strong"
+    if has_identifier and len(support_types) > 1:
         return "strong"
     if score >= 4.0 or (has_location and has_temporal):
         return "moderate"
@@ -716,12 +871,13 @@ async def _complete(
     lines: list[dict],
     summary: list[str],
     output: dict,
+    status: str = "done",
 ) -> None:
     await collections.agent_runs().update_one(
         {"investigation_id": investigation_id, "agent_id": agent_id},
         {
             "$set": {
-                "status": "done",
+                "status": status,
                 "summary": summary,
                 "output": output,
                 "updated_at": utcnow(),

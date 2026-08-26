@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, Check, Loader2, AlertTriangle, Scan, Layers, Clock, Link2, User, FileText } from "lucide-react";
-import { AGENTS, type AgentRun, type AgentLine } from "@/lib/investigation";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  Clock,
+  FileText,
+  Layers,
+  Link2,
+  Loader2,
+  Scan,
+  User,
+} from "lucide-react";
+import { AGENTS, type AgentLine, type AgentRun } from "@/lib/investigation";
 
 const iconFor = {
   collector: Layers,
@@ -16,12 +27,16 @@ function LineRow({ line }: { line: AgentLine }) {
   const color =
     line.kind === "ok"
       ? "text-[color:var(--gold)]"
-      : line.kind === "warn"
-        ? "text-amber-400"
-        : line.kind === "scan"
-          ? "text-[color:var(--crimson-glow)]"
-          : "text-foreground/70";
-  const glyph = line.kind === "ok" ? "✓" : line.kind === "warn" ? "!" : "›";
+      : line.kind === "error"
+        ? "text-red-400"
+        : line.kind === "warn"
+          ? "text-amber-400"
+          : line.kind === "scan"
+            ? "text-[color:var(--crimson-glow)]"
+            : "text-foreground/70";
+  const glyph =
+    line.kind === "ok" ? "✓" : line.kind === "warn" ? "!" : line.kind === "error" ? "×" : "›";
+
   return (
     <motion.div
       initial={{ opacity: 0, x: -6 }}
@@ -49,6 +64,18 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-emerald-300">
         <Check className="h-3 w-3" /> COMPLETE
       </span>
+    ) : run.status === "completed_with_warnings" ? (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-amber-300">
+        <AlertTriangle className="h-3 w-3" /> WARNINGS
+      </span>
+    ) : run.status === "failed" ? (
+      <span className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-red-300">
+        <AlertTriangle className="h-3 w-3" /> FAILED
+      </span>
+    ) : run.status === "blocked" ? (
+      <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-foreground/60">
+        BLOCKED
+      </span>
     ) : run.status === "running" ? (
       <span className="inline-flex items-center gap-1 rounded-full bg-[color:var(--crimson)]/15 px-2 py-0.5 text-[10px] font-medium tracking-widest text-[color:var(--crimson-glow)]">
         <Loader2 className="h-3 w-3 animate-spin" /> RUNNING
@@ -58,6 +85,19 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
         QUEUED
       </span>
     );
+
+  const iconState =
+    run.status === "done"
+      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
+      : run.status === "completed_with_warnings"
+        ? "border-amber-400/30 bg-amber-400/10 text-amber-300"
+        : run.status === "failed"
+          ? "border-red-500/30 bg-red-500/10 text-red-300"
+          : run.status === "blocked"
+            ? "border-white/15 bg-white/10 text-foreground/60"
+            : run.status === "running"
+              ? "border-[color:var(--crimson)]/40 bg-[color:var(--crimson)]/10 text-[color:var(--crimson-glow)]"
+              : "border-white/10 bg-white/5 text-foreground/50";
 
   return (
     <motion.div
@@ -78,13 +118,7 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
         className="flex w-full items-center gap-3 p-4 text-left"
       >
         <div
-          className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border ${
-            run.status === "done"
-              ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
-              : run.status === "running"
-                ? "border-[color:var(--crimson)]/40 bg-[color:var(--crimson)]/10 text-[color:var(--crimson-glow)]"
-                : "border-white/10 bg-white/5 text-foreground/50"
-          }`}
+          className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border ${iconState}`}
         >
           <Icon className="h-5 w-5" />
         </div>
@@ -132,7 +166,7 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
               ))}
               {run.status === "running" && (
                 <div className="flex items-center gap-2 pt-1 text-[11px] text-foreground/40">
-                  <Loader2 className="h-3 w-3 animate-spin" /> processing…
+                  <Loader2 className="h-3 w-3 animate-spin" /> processing...
                 </div>
               )}
             </div>
@@ -144,19 +178,34 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
 }
 
 export function AgentStream({ runs }: { runs: AgentRun[] }) {
-  const complete = runs.filter((r) => r.status === "done").length;
+  const complete = runs.filter(
+    (r) => r.status === "done" || r.status === "completed_with_warnings",
+  ).length;
+  const failed = runs.filter((r) => r.status === "failed").length;
+  const blocked = runs.filter((r) => r.status === "blocked").length;
   const total = runs.length || AGENTS.length;
   const pct = Math.round((complete / total) * 100);
+
+  const label =
+    failed > 0
+      ? "INVESTIGATION FAILED"
+      : blocked > 0
+        ? "INVESTIGATION BLOCKED"
+        : complete === total
+          ? "INVESTIGATION COMPLETE"
+          : "INVESTIGATION IN PROGRESS";
 
   return (
     <div className="space-y-4">
       <div className="glass flex items-center justify-between rounded-xl px-4 py-3">
         <div>
           <div className="font-mono text-[10px] tracking-[0.3em] text-[color:var(--crimson-glow)]">
-            {complete === total ? "INVESTIGATION COMPLETE" : "INVESTIGATION IN PROGRESS"}
+            {label}
           </div>
           <div className="mt-1 text-sm font-semibold">
             {complete} / {total} AGENTS COMPLETE
+            {blocked ? ` · ${blocked} BLOCKED` : ""}
+            {failed ? ` · ${failed} FAILED` : ""}
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -171,7 +220,6 @@ export function AgentStream({ runs }: { runs: AgentRun[] }) {
         </div>
       </div>
 
-      {/* Vertical connecting thread */}
       <div className="relative pl-1">
         <div className="pointer-events-none absolute left-[27px] top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-[color:var(--crimson)]/30 to-transparent" />
         <div className="space-y-4">

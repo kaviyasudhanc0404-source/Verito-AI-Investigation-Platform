@@ -49,7 +49,7 @@ _EXT_MAP: dict[str, str] = {
     ".xls":  "excel",
     # ── Structured data ───────────────────────────────────────────────────────
     ".xml":  "xml",
-    ".json": "chat",    # JSON files are treated as structured chat logs
+    ".json": "json",    # Parsed as chat when chat-shaped, otherwise generic JSON
     # ── Images (EasyOCR + Gemini) ────────────────────────────────────────────
     ".jpg":  "image",
     ".jpeg": "image",
@@ -97,7 +97,7 @@ def is_text_based(file_type: str) -> bool:
     """Return True if the file type produces extractable text."""
     return file_type in {
         "pdf", "docx", "doc", "pptx", "html", "markdown",
-        "txt", "csv", "excel", "xml", "email", "msg", "chat",
+        "txt", "csv", "excel", "xml", "email", "msg", "chat", "json",
     }
 
 

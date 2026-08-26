@@ -14,6 +14,8 @@ export type SseEvent =
   | { event: "agent_activity"; agent_id: string; line: { kind: string; text: string } }
   | { event: "agent_output"; agent_id: string; summary: string[] }
   | { event: "agent_completed"; agent_id: string }
+  | { event: "agent_completed_with_warnings"; agent_id: string }
+  | { event: "agent_blocked"; agent_id: string; reason: string }
   | { event: "agent_failed"; agent_id: string; error: string }
   | { event: "investigation_completed"; investigation_id: string }
   | { event: "stream_end" };
@@ -126,11 +128,41 @@ function handleEvent(
       }));
       break;
 
+    case "agent_completed_with_warnings":
+      onUpdate((prev) => ({
+        ...prev,
+        runs: prev.runs.map((r) =>
+          r.id === payload.agent_id ? { ...r, status: "completed_with_warnings" as const } : r,
+        ),
+      }));
+      break;
+
+    case "agent_blocked":
+      onUpdate((prev) => ({
+        ...prev,
+        runs: prev.runs.map((r) =>
+          r.id === payload.agent_id
+            ? {
+                ...r,
+                status: "blocked" as const,
+                lines: [...r.lines, { kind: "warn" as const, text: payload.reason }],
+              }
+            : r,
+        ),
+      }));
+      break;
+
     case "agent_failed":
       onUpdate((prev) => ({
         ...prev,
         runs: prev.runs.map((r) =>
-          r.id === payload.agent_id ? { ...r, status: "idle" as const } : r,
+          r.id === payload.agent_id
+            ? {
+                ...r,
+                status: "failed" as const,
+                lines: [...r.lines, { kind: "error" as const, text: payload.error }],
+              }
+            : r,
         ),
       }));
       break;

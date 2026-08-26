@@ -26,6 +26,7 @@ from app.agents import (
 )
 from app.database import collections
 from app.utils.datetime_utils import utcnow
+from app.utils.grounding_gate import run_grounding_gate
 
 # Type for the SSE emit callback
 Emitter = Callable[[str, dict], Awaitable[None]]
@@ -133,6 +134,14 @@ async def run_investigation_pipeline(
     async def node_timeline(s: InvestigationState) -> InvestigationState:
         if s.get("error"):
             return s
+        if not _analyzer_has_signal(s.get("analyzer_output", {})):
+            output = await _mark_blocked(
+                s["investigation_id"],
+                "timeline",
+                "Blocked because Evidence Analyzer produced no usable entities or findings.",
+            )
+            await emit("agent_blocked", {"agent_id": "timeline", "reason": output["reason"]})
+            return {**s, "timeline_output": output}
         await emit("agent_started", {"agent_id": "timeline"})
         try:
             output = await timeline_builder.run(
@@ -147,6 +156,14 @@ async def run_investigation_pipeline(
     async def node_linker(s: InvestigationState) -> InvestigationState:
         if s.get("error"):
             return s
+        if not _analyzer_has_signal(s.get("analyzer_output", {})):
+            output = await _mark_blocked(
+                s["investigation_id"],
+                "linker",
+                "Blocked because Evidence Analyzer produced no usable cross-evidence signals.",
+            )
+            await emit("agent_blocked", {"agent_id": "linker", "reason": output["reason"]})
+            return {**s, "linker_output": output}
         await emit("agent_started", {"agent_id": "linker"})
         try:
             output = await evidence_linker.run(
@@ -164,6 +181,14 @@ async def run_investigation_pipeline(
     async def node_subject(s: InvestigationState) -> InvestigationState:
         if s.get("error"):
             return s
+        if not _analyzer_has_signal(s.get("analyzer_output", {})):
+            output = await _mark_blocked(
+                s["investigation_id"],
+                "subject",
+                "Blocked because Evidence Analyzer produced no supported people/entities.",
+            )
+            await emit("agent_blocked", {"agent_id": "subject", "reason": output["reason"]})
+            return {**s, "subject_output": output}
         await emit("agent_started", {"agent_id": "subject"})
         try:
             output = await subject_analyzer.run(
@@ -194,6 +219,41 @@ async def run_investigation_pipeline(
                 subject_output=s["subject_output"],
                 investigation_prompt=s["investigation_prompt"],
             )
+
+            # ── Grounding gate ─────────────────────────────────────────────────
+            valid_ids: set[str] = set(
+                str(eid).upper()
+                for eid in s["collector_output"].get("evidence_ids", [])
+                if eid
+            )
+            gate_result = run_grounding_gate(output, valid_evidence_ids=valid_ids)
+
+            # Log gate result as SSE activity so it appears in the agent stream
+            gate_line = {
+                "kind": "warn" if not gate_result.passed else "ok",
+                "text": f"Grounding gate: {gate_result.summary()}",
+            }
+            await emit("agent_activity", {"agent_id": "report", "line": gate_line})
+
+            # Merge gate result into stored output (non-breaking annotation)
+            output["grounding_gate_result"] = gate_result.to_dict()
+            if not gate_result.passed:
+                # Persist gate violation lines to agent_run document
+                for violation in gate_result.violations:
+                    v_line = {
+                        "kind": "warn",
+                        "text": f"[Gate:{violation.rule}] {violation.section}[{violation.item_index}]: {violation.detail}",
+                    }
+                    await collections.agent_runs().update_one(
+                        {"investigation_id": s["investigation_id"], "agent_id": "report"},
+                        {"$push": {"lines": v_line}, "$set": {"updated_at": utcnow()}},
+                    )
+                # Update stored report with gate annotations
+                await collections.reports().update_one(
+                    {"investigation_id": s["investigation_id"]},
+                    {"$set": {"grounding_gate_result": gate_result.to_dict()}},
+                )
+
             return {**s, "report_output": output}
         except Exception as e:
             await emit("agent_failed", {"agent_id": "report", "error": str(e)})
@@ -252,3 +312,42 @@ async def _mark_failed(investigation_id: str, agent_id: str) -> None:
         {"investigation_id": investigation_id, "agent_id": agent_id},
         {"$set": {"status": "failed", "updated_at": utcnow()}},
     )
+
+
+def _analyzer_has_signal(output: dict) -> bool:
+    if not isinstance(output, dict):
+        return False
+    signal_keys = (
+        "people",
+        "organisations",
+        "locations",
+        "dates",
+        "times",
+        "contact_info",
+        "identifiers",
+        "amounts",
+        "observations",
+        "findings",
+        "key_statements",
+        "key_findings",
+    )
+    return any(output.get(key) for key in signal_keys)
+
+
+async def _mark_blocked(investigation_id: str, agent_id: str, reason: str) -> dict:
+    line = {"kind": "warn", "text": reason}
+    output = {"blocked": True, "reason": reason}
+    await collections.agent_runs().update_one(
+        {"investigation_id": investigation_id, "agent_id": agent_id},
+        {
+            "$set": {
+                "status": "blocked",
+                "lines": [line],
+                "summary": ["Blocked by upstream analyzer output"],
+                "output": output,
+                "updated_at": utcnow(),
+            }
+        },
+        upsert=True,
+    )
+    return output

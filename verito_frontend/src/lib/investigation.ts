@@ -22,7 +22,7 @@ export const AGENTS: AgentDef[] = [
   { id: "report", name: "Report Generator", role: "Assembles final findings", icon: "file" },
 ];
 
-export type LineKind = "info" | "ok" | "scan" | "warn";
+export type LineKind = "info" | "ok" | "scan" | "warn" | "error";
 
 export interface AgentLine {
   kind: LineKind;
@@ -31,7 +31,7 @@ export interface AgentLine {
 
 export interface AgentRun {
   id: AgentId;
-  status: "idle" | "running" | "done";
+  status: "idle" | "running" | "done" | "completed_with_warnings" | "failed" | "blocked";
   lines: AgentLine[];
   summary: string[];
 }
@@ -41,7 +41,7 @@ export interface CaseRecord {
   title: string;
   prompt: string;
   createdAt: number;
-  status: "processing" | "complete";
+  status: "processing" | "complete" | "failed";
   evidence: EvidenceItem[];
   runs: AgentRun[];
   report?: FinalReport;

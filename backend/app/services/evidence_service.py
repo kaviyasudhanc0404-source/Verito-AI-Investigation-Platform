@@ -91,6 +91,10 @@ async def _extract_content(
         from app.parsers.chat_parser import parse
         return await asyncio.to_thread(parse, file_bytes, filename)
 
+    if file_type == "json":
+        from app.parsers.json_parser import parse
+        return await asyncio.to_thread(parse, file_bytes, filename)
+
     if file_type == "zip":
         from app.parsers.zip_extractor import parse
         return await asyncio.to_thread(parse, file_bytes, filename)

@@ -48,7 +48,7 @@ function backendToCase(inv: Awaited<ReturnType<typeof investigationsApi.get>>): 
     title: inv.title,
     prompt: inv.prompt,
     createdAt: new Date(inv.created_at).getTime(),
-    status: inv.status === "failed" ? "processing" : inv.status,
+    status: inv.status,
     evidence: inv.evidence.map((e) => ({
       id: e.id,
       name: e.name,
@@ -58,7 +58,7 @@ function backendToCase(inv: Awaited<ReturnType<typeof investigationsApi.get>>): 
     runs: inv.runs.length > 0
       ? inv.runs.map((r) => ({
           id: r.id as CaseRecord["runs"][number]["id"],
-          status: r.status === "failed" ? "idle" as const : r.status as "idle" | "running" | "done",
+          status: r.status as CaseRecord["runs"][number]["status"],
           lines: r.lines as CaseRecord["runs"][number]["lines"],
           summary: r.summary,
         }))
@@ -98,7 +98,7 @@ function Workspace() {
         title: item.title,
         prompt: "",
         createdAt: new Date(item.created_at).getTime(),
-        status: item.status === "failed" ? "processing" as const : item.status,
+        status: item.status,
         evidence: [],
         runs: makeEmptyRuns(),
         chat: [],

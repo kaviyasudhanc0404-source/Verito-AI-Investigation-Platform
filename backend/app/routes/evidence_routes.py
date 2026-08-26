@@ -165,10 +165,10 @@ async def delete_evidence(
 
     # Delete from MongoDB
     await collections.evidence().delete_many(
-        {"investigation_id": investigation_id}
+        {"investigation_id": investigation_id, "user_id": current_user["_id"]}
     )
 
     # Delete from Qdrant (run in thread — sync client)
-    await asyncio.to_thread(delete_investigation_chunks, investigation_id)
+    await asyncio.to_thread(delete_investigation_chunks, investigation_id, current_user["_id"])
 
     return {"deleted": True, "investigation_id": investigation_id}

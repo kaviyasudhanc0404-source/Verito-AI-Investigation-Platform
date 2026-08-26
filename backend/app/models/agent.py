@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 
 
 AgentId = Literal["collector", "analyzer", "timeline", "linker", "subject", "report"]
-AgentStatus = Literal["idle", "running", "done", "failed"]
-LineKind = Literal["info", "ok", "scan", "warn"]
+AgentStatus = Literal["idle", "running", "done", "completed_with_warnings", "failed", "blocked"]
+LineKind = Literal["info", "ok", "scan", "warn", "error"]
 
 
 class AgentLine(BaseModel):
