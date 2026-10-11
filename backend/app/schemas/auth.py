@@ -45,6 +45,20 @@ class TokenResponse(BaseModel):
     email: str
 
 
+class UpdateProfileRequest(BaseModel):
+    name: str | None = None
+    email: EmailStr | None = None
+    current_password: str | None = None
+    new_password: str | None = None
+
+    @field_validator("new_password")
+    @classmethod
+    def new_password_min_length(cls, v: str | None) -> str | None:
+        if v is not None and len(v) < 8:
+            raise ValueError("New password must be at least 8 characters")
+        return v
+
+
 class UserResponse(BaseModel):
     user_id: str
     name: str

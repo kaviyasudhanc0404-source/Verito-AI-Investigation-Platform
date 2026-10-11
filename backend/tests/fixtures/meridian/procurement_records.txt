@@ -1,0 +1,31 @@
+[Excel Evidence: procurement_records.xlsx]
+
+[Sheet: Purchase Orders]
+Columns: PO Number | Date | Requested By | Vendor | Description | Total Amount | Approved By | Approval Date
+Total rows: 7
+
+[Row 1] PO Number: PO-2026-0341 | Date: 2026-03-05 | Requested By: MIL-EMP-0761 | Vendor: MIL-VEN-2231 | Description: MS TMT Bars 12mm | Total Amount: 1164000 | Approved By: MIL-EMP-0203 | Approval Date: 2026-03-06
+[Row 2] PO Number: PO-2026-0342 | Date: 2026-03-07 | Requested By: MIL-EMP-0587 | Vendor: MIL-VEN-3309 | Description: Site security & fencing materials | Total Amount: 198500 | Approved By: MIL-EMP-0587 | Approval Date: 2026-03-07
+[Row 3] PO Number: PO-2026-0349 | Date: 2026-03-14 | Requested By: MIL-EMP-0587 | Vendor: MIL-VEN-3309 | Description: Fencing materials - Phase 2 | Total Amount: 197800 | Approved By: MIL-EMP-0587 | Approval Date: 2026-03-14
+[Row 4] PO Number: PO-2026-0355 | Date: 2026-03-21 | Requested By: MIL-EMP-0587 | Vendor: MIL-VEN-3309 | Description: Scaffolding rental - March | Total Amount: 195200 | Approved By: MIL-EMP-0587 | Approval Date: 2026-03-21
+[Row 5] PO Number: PO-2026-0362 | Date: 2026-03-29 | Requested By: MIL-EMP-0587 | Vendor: MIL-VEN-3309 | Description: Scaffolding rental - April advance | Total Amount: 199000 | Approved By: MIL-EMP-0587 | Approval Date: 2026-03-29
+[Row 6] PO Number: PO-2026-0368 | Date: 2026-04-02 | Requested By: MIL-EMP-0761 | Vendor: MIL-VEN-1187 | Description: Electrical fittings | Total Amount: 432600 | Approved By: MIL-EMP-0203 | Approval Date: 2026-04-03
+[Row 7] PO Number: PO-2026-0374 | Date: 2026-04-10 | Requested By: MIL-EMP-0587 | Vendor: MIL-VEN-3309 | Description: Site cleanup services | Total Amount: 196400 | Approved By: MIL-EMP-0587 | Approval Date: 2026-04-10
+
+[Sheet: Invoice Register]
+Columns: Invoice Number | Invoice Date | Vendor ID | PO Number | Invoice Amount | Total Amount | Paid Date
+Total rows: 7
+
+[Row 1] Invoice Number: INV-SVK-2245 | Invoice Date: 2026-03-09 | Vendor ID: MIL-VEN-2231 | PO Number: PO-2026-0341 | Invoice Amount: 1164000 | Total Amount: 1373520 | Paid Date: 2026-03-22
+[Row 2] Invoice Number: INV-KBS-0091 | Invoice Date: 2026-03-08 | Vendor ID: MIL-VEN-3309 | PO Number: PO-2026-0342 | Invoice Amount: 198500 | Total Amount: 234230 | Paid Date: 2026-03-10
+[Row 3] Invoice Number: INV-KBS-0094 | Invoice Date: 2026-03-15 | Vendor ID: MIL-VEN-3309 | PO Number: PO-2026-0349 | Invoice Amount: 197800 | Total Amount: 233404 | Paid Date: 2026-03-17
+[Row 4] Invoice Number: INV-KBS-0102 | Invoice Date: 2026-03-22 | Vendor ID: MIL-VEN-3309 | PO Number: PO-2026-0355 | Invoice Amount: 195200 | Total Amount: 230336 | Paid Date: 2026-03-24
+[Row 5] Invoice Number: INV-KBS-0110 | Invoice Date: 2026-03-30 | Vendor ID: MIL-VEN-3309 | PO Number: PO-2026-0362 | Invoice Amount: 199000 | Total Amount: 234820 | Paid Date: 2026-04-01
+[Row 6] Invoice Number: INV-AEH-3312 | Invoice Date: 2026-04-05 | Vendor ID: MIL-VEN-1187 | PO Number: PO-2026-0368 | Invoice Amount: 432600 | Total Amount: 510468 | Paid Date: 2026-04-19
+[Row 7] Invoice Number: INV-KBS-0119 | Invoice Date: 2026-04-11 | Vendor ID: MIL-VEN-3309 | PO Number: PO-2026-0374 | Invoice Amount: 196400 | Total Amount: 231752 | Paid Date: 2026-04-12
+
+[Sheet: Procurement Policy Reference]
+Columns: Field | Value
+Total rows: 1
+
+[Row 1] Field: Rule | Value: A second-level approver is required for a single purchase order exceeding Rs.2,00,000.

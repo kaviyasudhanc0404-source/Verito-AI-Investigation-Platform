@@ -27,14 +27,6 @@ def new_evidence_db_id() -> str:
     return "ev_" + uuid.uuid4().hex[:10]
 
 
-def new_agent_run_id() -> str:
-    """Generate a unique MongoDB _id for an agent_run document."""
-    return "ar_" + uuid.uuid4().hex[:10]
-
-
-def new_report_id() -> str:
-    """Generate a unique MongoDB _id for a report document."""
-    return "rpt_" + uuid.uuid4().hex[:8]
 
 
 def format_evidence_id(index: int) -> str:

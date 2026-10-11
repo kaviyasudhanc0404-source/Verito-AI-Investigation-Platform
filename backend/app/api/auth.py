@@ -1,17 +1,18 @@
 """
 api/auth.py
 -----------
-Authentication endpoints: signup, login, Google login, current user.
+Authentication endpoints: signup, login, Google login, current user profile.
 """
 
 from fastapi import APIRouter, Depends
 
 from app.dependencies.auth import get_current_user
 from app.schemas.auth import (
-    SignupRequest,
-    LoginRequest,
     GoogleLoginRequest,
+    LoginRequest,
+    SignupRequest,
     TokenResponse,
+    UpdateProfileRequest,
     UserResponse,
 )
 from app.services import auth_service
@@ -58,3 +59,10 @@ async def me(current_user: dict = Depends(get_current_user)) -> UserResponse:
         name=current_user["name"],
         email=current_user["email"],
     )
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_me(body: UpdateProfileRequest, current_user: dict = Depends(get_current_user)) -> UserResponse:
+    """Update the current user's name, email and/or password."""
+    user = await auth_service.update_profile(current_user, **body.model_dump())
+    return UserResponse(user_id=user["_id"], name=user["name"], email=user["email"])

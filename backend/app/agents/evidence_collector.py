@@ -1,317 +1,138 @@
 """
 agents/evidence_collector.py
 ------------------------------
-Agent 01 — Evidence Collector (Full Pipeline)
+Agent 01 — Evidence Collector.
 
-Orchestrates the complete evidence ingestion pipeline for an investigation:
-  1. Fetch all uploaded evidence documents from MongoDB
-  2. Read file bytes from disk
-  3. Dispatch to the correct parser based on detected file type
-  4. Clean extracted text (two-phase evidence-preserving cleaner)
-  5. Chunk into semantically coherent segments (structure-aware chunker)
-  6. Generate embeddings (BAAI/bge-small-en-v1.5)
-  7. Store vectors in Qdrant Cloud
-  8. Update evidence content in MongoDB
-  9. Emit SSE activity lines throughout
+For every uploaded file:  parse → clean → chunk → embed → store in Qdrant Cloud,
+then save the cleaned text and an ingestion report on the evidence document.
+Parsing is dispatched by app.parsers.parse_evidence (one table for all types).
 
-File Type → Parser Mapping:
-  .pdf .docx .pptx .html .md     → parsers/docling_parser.py   (Docling unified)
-  .jpg .jpeg .png .bmp .tiff .webp → parsers/image_parser.py  (EasyOCR + Gemini)
-  .eml                           → parsers/email_parser.py     (Python stdlib email)
-  .msg                           → parsers/msg_parser.py       (extract-msg)
-  .csv                           → parsers/csv_parser.py       (Python stdlib csv)
-  .xlsx / .xls                   → parsers/excel_parser.py     (pandas + openpyxl)
-  .xml                           → parsers/xml_parser.py       (lxml / ElementTree)
-  .json / .txt (chat logs)       → parsers/chat_parser.py      (custom)
-  .zip                           → parsers/zip_extractor.py    (zipfile + recursive)
+Nothing is dropped silently. Every file gets an ingestion report:
+  status      indexed | indexed_with_warnings | empty | failed
+  filename, format, characters, pages, records, chunks, ocr (bool), warnings[], error
+and the report's evidence inventory shows it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import socket
 from pathlib import Path
-from typing import Callable, Awaitable
 
+from app.agents.base import AgentResult, AgentRun, PipelineContext
 from app.database import collections
+from app.parsers import PARSE_WARNING, parse_evidence
+from app.services.chunking_service import chunk_text
+from app.services.records import extract_records
+from app.services.text_cleaner import clean
+from app.services.vector_store import store_evidence_chunks
 from app.utils.datetime_utils import utcnow
 from app.utils.file_detector import detect_file_type
 
-# Type for the SSE emit callback
-Emitter = Callable[[str, dict], Awaitable[None]]
-
-# All Docling-supported formats mapped to their InputFormat fmt string.
-# One function handles all of them — no separate wrapper files needed.
-_DOCLING_FMT: dict[str, str] = {
-    "pdf":      "pdf",
-    "docx":     "docx",
-    "doc":      "docx",
-    "pptx":     "pptx",
-    "html":     "html",
-    "markdown": "md",
-}
+_STORE_ATTEMPTS = 4
+_RETRYABLE = ("name resolution", "getaddrinfo", "connection", "timed out", "timeout", "429", "502", "503", "504")
+_STRUCTURED_TYPES = {"csv", "excel", "json", "xml"}
 
 
-# ── Parser dispatch ───────────────────────────────────────────────────────────
-
-def _parse_evidence(file_bytes: bytes, filename: str, file_type: str) -> str:
-    """
-    Dispatch to the correct parser based on detected file type.
-
-    Args:
-        file_bytes: Raw file bytes.
-        filename:   Original filename.
-        file_type:  Detected type string from file_detector.
-
-    Returns:
-        Extracted plain text (may be empty if unsupported).
-    """
-    # ── Docling: one function handles PDF / DOCX / PPTX / HTML / Markdown ────
-    if file_type in _DOCLING_FMT:
-        from app.parsers.docling_parser import parse_with_docling
-        return parse_with_docling(file_bytes, filename, fmt=_DOCLING_FMT[file_type])
-
-    # ── Image: EasyOCR + Gemini ──────────────────────────────────────────────
-    if file_type == "image":
-        from app.parsers.image_parser import parse
-        return parse(file_bytes, filename)
-
-    # ── Email parsers ─────────────────────────────────────────────────────────
-    if file_type == "email":
-        from app.parsers.email_parser import parse
-        return parse(file_bytes, filename)
-
-    if file_type == "msg":
-        from app.parsers.msg_parser import parse
-        return parse(file_bytes, filename)
-
-    # ── Tabular data ──────────────────────────────────────────────────────────
-    if file_type == "csv":
-        from app.parsers.csv_parser import parse
-        return parse(file_bytes, filename)
-
-    if file_type == "excel":
-        from app.parsers.excel_parser import parse
-        return parse(file_bytes, filename)
-
-    # ── Structured data ───────────────────────────────────────────────────────
-    if file_type == "xml":
-        from app.parsers.xml_parser import parse
-        return parse(file_bytes, filename)
-
-    # ── Chat logs (JSON / TXT) ────────────────────────────────────────────────
-    if file_type == "chat":
-        from app.parsers.chat_parser import parse
-        return parse(file_bytes, filename)
-
-    if file_type == "json":
-        from app.parsers.json_parser import parse
-        return parse(file_bytes, filename)
-
-    # ── Archive ───────────────────────────────────────────────────────────────
-    if file_type == "zip":
-        from app.parsers.zip_extractor import parse
-        return parse(file_bytes, filename)
-
-    # ── Plain text fallback ───────────────────────────────────────────────────
-    try:
-        return file_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        return file_bytes.decode("latin-1", errors="replace")
-
-
-# ── Agent entry point ─────────────────────────────────────────────────────────
-
-async def run(
-    investigation_id: str,
-    emit: Emitter,
-) -> dict:
-    """
-    Run the Evidence Collector agent for an investigation.
-
-    Processes all uploaded evidence files:
-      parse → clean → chunk → embed → store in Qdrant Cloud
-
-    Args:
-        investigation_id: The investigation to process.
-        emit: Async SSE callback — emit(event_name, payload).
-
-    Returns:
-        Structured output dict with processing summary.
-    """
-    agent_id = "collector"
-
-    await _set_status(investigation_id, agent_id, "running")
-
-    lines: list[dict] = []
-
-    async def add_line(kind: str, text: str) -> None:
-        line = {"kind": kind, "text": text}
-        lines.append(line)
-        await _append_line(investigation_id, agent_id, line)
-        await emit("agent_activity", {"agent_id": agent_id, "line": line})
-
-    # ── 1. Fetch evidence documents from MongoDB ──────────────────────────────
+async def run(ctx: PipelineContext, agent: AgentRun) -> AgentResult:
     evidence_docs = await collections.evidence().find(
-        {"investigation_id": investigation_id}
+        {"investigation_id": ctx.investigation_id}, sort=[("evidence_id", 1)]
     ).to_list(length=None)
-
-    await add_line("info", f"Found {len(evidence_docs)} evidence item(s) to process.")
-
+    await agent.log("info", f"Found {len(evidence_docs)} evidence file(s) to process.")
     if not evidence_docs:
-        await add_line("warn", "No evidence found for this investigation.")
-        output = {"items_indexed": 0, "items_failed": 0, "evidence_ids": []}
-        await _complete(investigation_id, agent_id, lines, ["0 items indexed"], output)
-        await emit("agent_completed", {"agent_id": agent_id})
-        return output
+        return AgentResult({"evidence_ids": [], "failed_ids": [], "files": {}}, ["No evidence uploaded"], "blocked",
+                           "No evidence files were uploaded for this investigation.")
 
-    # ── 2. Process each evidence item ─────────────────────────────────────────
-    evidence_ids: list[str] = []
-    failed_ids: list[str] = []
-
+    files: dict[str, dict] = {}
     for ev in evidence_docs:
-        ev_id: str = ev["evidence_id"]
-        filename: str = ev["filename"]
-        file_path: str = ev.get("file_path", "")
-
-        await add_line("scan", f"Processing {filename} [{ev_id}]...")
-
-        try:
-            # ── 2a. Read file bytes from disk ──────────────────────────────
-            if not file_path or not Path(file_path).exists():
-                await add_line("warn", f"{ev_id}: File not found on disk — {file_path}")
-                failed_ids.append(ev_id)
-                continue
-
-            file_bytes = Path(file_path).read_bytes()
-
-            # ── 2b. Detect file type ───────────────────────────────────────
-            file_type = detect_file_type(filename)
-            await add_line("info", f"{ev_id}: Detected type → {file_type}")
-
-            # ── 2c. Parse (in thread to avoid blocking event loop) ─────────
-            raw_text: str = await asyncio.to_thread(
-                _parse_evidence, file_bytes, filename, file_type
-            )
-
-            if not raw_text.strip():
-                await add_line("warn", f"{ev_id}: No text extracted from {filename}")
-                failed_ids.append(ev_id)
-                continue
-
-            await add_line("ok", f"{ev_id}: Extracted {len(raw_text):,} characters")
-
-            # ── 2d. Clean text (two-phase evidence-preserving cleaner) ──────
-            from app.services.text_cleaner import clean
-            cleaned_text = await asyncio.to_thread(clean, raw_text)
-
-            # ── 2e. Chunk (structure-aware semantic chunker) ────────────────
-            from app.services.chunking_service import chunk_text
-            chunks = await asyncio.to_thread(chunk_text, cleaned_text)
-            await add_line("info", f"{ev_id}: Split into {len(chunks)} chunk(s)")
-
-            if not chunks:
-                await add_line("warn", f"{ev_id}: No valid chunks produced from {filename}")
-                failed_ids.append(ev_id)
-                continue
-
-            # ── 2f. Embed + Store in Qdrant Cloud ──────────────────────────
-            # Pass pre-computed chunks — avoids double chunking inside store_evidence_chunks
-            from app.services.vector_store import store_evidence_chunks
-            stored_count: int = await asyncio.to_thread(
-                store_evidence_chunks,
-                text=cleaned_text,
-                chunks=chunks,
-                user_id=ev.get("user_id", ""),
-                investigation_id=investigation_id,
-                evidence_id=ev_id,
-                filename=filename,
-            )
-            await add_line("ok", f"{ev_id}: Stored {stored_count} vector(s) in Qdrant Cloud")
-
-            # ── 2g. Update content in MongoDB ──────────────────────────────
-            await collections.evidence().update_one(
-                {"evidence_id": ev_id, "investigation_id": investigation_id},
-                {"$set": {"content": cleaned_text, "updated_at": utcnow()}},
-            )
-
-            evidence_ids.append(ev_id)
-            await asyncio.sleep(0.1)  # Yield to event loop for SSE streaming
-
-        except Exception as exc:
-            await add_line("error", f"{ev_id}: Failed — {exc}")
-            failed_ids.append(ev_id)
-
-    # ── 3. Summary ────────────────────────────────────────────────────────────
-    await add_line(
-        "ok",
-        f"Complete: {len(evidence_ids)} indexed, {len(failed_ids)} failed.",
-    )
-
-    summary_lines = [f"{len(evidence_ids)} items indexed"]
-    if failed_ids:
-        summary_lines.append(f"{len(failed_ids)} failed: {', '.join(failed_ids)}")
-    if evidence_ids:
-        if len(evidence_ids) > 1:
-            summary_lines.append(f"IDs: {evidence_ids[0]} – {evidence_ids[-1]}")
+        ev_id, filename = ev["evidence_id"], ev["filename"]
+        await agent.log("scan", f"{ev_id}: processing {filename}")
+        report = await _ingest(ctx, ev)
+        files[ev_id] = report
+        await collections.evidence().update_one({"_id": ev["_id"]}, {"$set": {"ingestion": report, "updated_at": utcnow()}})
+        if report["status"] == "failed":
+            await agent.log("error", f"{ev_id}: failed — {report['error']}")
+        elif report["status"] == "empty":
+            await agent.log("warn", f"{ev_id}: no readable text found in {filename}")
         else:
-            summary_lines.append(f"ID: {evidence_ids[0]}")
+            detail = f"{report['chunks']} chunk(s), {report['records']} record(s)"
+            await agent.log("ok", f"{ev_id}: {detail} stored")
+            for warning in report["warnings"]:
+                await agent.log("warn", f"{ev_id}: {warning}")
 
-    output = {
-        "items_indexed": len(evidence_ids),
-        "items_failed": len(failed_ids),
-        "evidence_ids": evidence_ids,
-        "failed_ids": failed_ids,
-    }
-
-    status = "completed_with_warnings" if failed_ids else "done"
-    await _complete(investigation_id, agent_id, lines, summary_lines, output, status=status)
-    event_name = "agent_completed_with_warnings" if failed_ids else "agent_completed"
-    await emit(event_name, {"agent_id": agent_id})
-
-    return output
-
-
-# ── MongoDB helpers ───────────────────────────────────────────────────────────
-
-async def _set_status(investigation_id: str, agent_id: str, status: str) -> None:
-    await collections.agent_runs().update_one(
-        {"investigation_id": investigation_id, "agent_id": agent_id},
-        {
-            "$set": {
-                "status": status,
-                "updated_at": utcnow(),
-            }
-        },
-        upsert=True,
-    )
+    indexed = [i for i, r in files.items() if r["status"].startswith("indexed")]
+    failed = [i for i, r in files.items() if i not in indexed]
+    await agent.log("ok", f"Complete: {len(indexed)} indexed, {len(failed)} not analysed.")
+    summary = [f"{len(indexed)} items indexed"] + ([f"{len(failed)} failed"] if failed else [])
+    counts = {"files": len(files), "indexed": len(indexed), "failed": len(failed),
+              "records": sum(r["records"] for r in files.values()), "chunks": sum(r["chunks"] for r in files.values())}
+    status = "failed" if not indexed else agent.status
+    return AgentResult({"evidence_ids": indexed, "failed_ids": failed, "files": files}, summary, status,
+                       "None of the evidence files could be read.", counts)
 
 
-async def _append_line(investigation_id: str, agent_id: str, line: dict) -> None:
-    await collections.agent_runs().update_one(
-        {"investigation_id": investigation_id, "agent_id": agent_id},
-        {
-            "$push": {"lines": line},
-            "$set": {"updated_at": utcnow()},
-        },
-    )
+async def _ingest(ctx: PipelineContext, ev: dict) -> dict:
+    """Parse, clean, chunk and store one evidence file. Returns its ingestion report (never raises)."""
+    filename = ev["filename"]
+    report = {"status": "failed", "filename": filename, "format": Path(filename).suffix.lstrip(".").lower(),
+              "characters": 0, "pages": 0, "records": 0, "chunks": 0, "ocr": False, "warnings": [], "error": ""}
+    file_path = ev.get("file_path", "")
+    if not file_path or not Path(file_path).exists():
+        report["error"] = "the file is missing on disk"
+        return report
+    try:
+        text = clean(await parse_evidence(file_path, filename))
+    except Exception as exc:
+        report["error"] = _short(exc)
+        return report
+
+    report.update(_profile(filename, text))
+    chunks = await asyncio.to_thread(chunk_text, text)
+    if not chunks:
+        report["status"] = "empty"
+        return report
+    try:
+        report["chunks"] = await _store(ctx, ev, text, chunks)
+    except Exception as exc:
+        report["error"] = f"could not be indexed: {_short(exc)}"
+        return report
+    await collections.evidence().update_one({"_id": ev["_id"]}, {"$set": {"content": text, "updated_at": utcnow()}})
+    report["status"] = "indexed_with_warnings" if report["warnings"] else "indexed"
+    return report
 
 
-async def _complete(
-    investigation_id: str,
-    agent_id: str,
-    lines: list[dict],
-    summary: list[str],
-    output: dict,
-    status: str = "done",
-) -> None:
-    await collections.agent_runs().update_one(
-        {"investigation_id": investigation_id, "agent_id": agent_id},
-        {
-            "$set": {
-                "status": status,
-                "summary": summary,
-                "output": output,
-                "updated_at": utcnow(),
-            }
-        },
-    )
+def _profile(filename: str, text: str) -> dict:
+    """What was extracted, and anything a reader should know about its reliability."""
+    file_type = detect_file_type(filename)
+    records = len(extract_records("", filename, text))
+    ocr = file_type == "image" or "[Image OCR Text]" in text
+    warnings = [f"{m['text'][:1].upper()}{m['text'][1:]}." for m in PARSE_WARNING.finditer(text)]
+    if "�" in text:
+        warnings.append("Some characters could not be decoded, so parts of the text may be missing.")
+    if file_type in _STRUCTURED_TYPES and text.strip() and not records:
+        warnings.append("No structured records were recognised; the file was analysed as plain text.")
+    if ocr:
+        warnings.append("Text was read with OCR and may contain recognition errors.")
+    return {"characters": len(text), "pages": text.count("\n[Page ") + text.startswith("[Page "),
+            "records": records, "ocr": ocr, "warnings": warnings}
+
+
+async def _store(ctx: PipelineContext, ev: dict, text: str, chunks: list[str]) -> int:
+    for attempt in range(1, _STORE_ATTEMPTS + 1):
+        try:
+            return await asyncio.to_thread(
+                store_evidence_chunks,
+                text=text, chunks=chunks, user_id=ev.get("user_id", ""),
+                investigation_id=ctx.investigation_id, evidence_id=ev["evidence_id"], filename=ev["filename"],
+            )
+        except Exception as exc:
+            retryable = isinstance(exc, (TimeoutError, ConnectionError, socket.gaierror)) or \
+                any(marker in str(exc).lower() for marker in _RETRYABLE)
+            if attempt == _STORE_ATTEMPTS or not retryable:
+                raise
+            await asyncio.sleep(min(2 ** attempt, 8))
+    return 0
+
+
+def _short(exc: Exception) -> str:
+    return " ".join(str(exc).split())[:160] or exc.__class__.__name__

@@ -30,10 +30,18 @@ export function VeritoWordmark({
       className={`relative inline-flex items-baseline font-brand font-bold tracking-[0.08em] ${sizes[size]}`}
     >
       <span className={animate ? "animate-wordmark" : ""}>V</span>
-      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "60ms" }}>E</span>
-      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "120ms" }}>R</span>
-      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "180ms" }}>I</span>
-      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "240ms" }}>T</span>
+      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "60ms" }}>
+        E
+      </span>
+      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "120ms" }}>
+        R
+      </span>
+      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "180ms" }}>
+        I
+      </span>
+      <span className={animate ? "animate-wordmark" : ""} style={{ animationDelay: "240ms" }}>
+        T
+      </span>
 
       {/* The "O" as a holographic magnifying lens */}
       <span
@@ -62,7 +70,14 @@ export function VeritoWordmark({
           </defs>
           <circle cx="50" cy="50" r="42" fill="url(#lens-grad)" />
           <circle cx="50" cy="50" r="42" fill="none" stroke="url(#lens-ring)" strokeWidth="4" />
-          <circle cx="50" cy="50" r="34" fill="none" stroke="oklch(0.66 0.24 22 / 0.35)" strokeWidth="1" />
+          <circle
+            cx="50"
+            cy="50"
+            r="34"
+            fill="none"
+            stroke="oklch(0.66 0.24 22 / 0.35)"
+            strokeWidth="1"
+          />
           {/* Fingerprint ridges */}
           <g
             stroke="oklch(0.9 0.14 82 / 0.7)"
@@ -83,17 +98,16 @@ export function VeritoWordmark({
             className="pointer-events-none absolute inset-[10%] overflow-hidden rounded-full"
             aria-hidden
           >
-            <span className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-transparent via-[color:var(--crimson-glow)] to-transparent ${scanClass}`} />
+            <span
+              className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-transparent via-[color:var(--crimson-glow)] to-transparent ${scanClass}`}
+            />
           </span>
         )}
       </span>
 
       {/* Crimson laser sweep — one-shot on mount, or continuous when requested */}
       {(animate || continuousScan) && (
-        <span
-          className="pointer-events-none absolute inset-0 overflow-hidden"
-          aria-hidden
-        >
+        <span className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
           <span
             className={`absolute inset-y-0 w-[30%] ${continuousScan ? "animate-laser" : "animate-laser-once"}`}
             style={{

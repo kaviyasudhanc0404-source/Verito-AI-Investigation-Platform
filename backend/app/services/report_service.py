@@ -1,34 +1,27 @@
 """
 services/report_service.py
 ---------------------------
-Store and retrieve the final investigation report in MongoDB.
+Store and retrieve the final investigation report in MongoDB (one per investigation).
 """
 
 from typing import Optional
+
 from app.database import collections
-from app.utils.id_generator import new_report_id
 
 
-async def save_report(investigation_id: str, report_data: dict) -> dict:
-    """
-    Upsert the final report for an investigation.
-    Returns the report document.
-    """
-    doc = {
-        "_id": new_report_id(),
-        "investigation_id": investigation_id,
-        **report_data,
-    }
+async def save_report(investigation_id: str, report: dict) -> None:
+    """Insert or replace the investigation's report (the document _id is kept on re-runs)."""
     await collections.reports().replace_one(
         {"investigation_id": investigation_id},
-        doc,
+        {"investigation_id": investigation_id, **report},
         upsert=True,
     )
-    return doc
+
+
+async def update_report(investigation_id: str, **fields) -> None:
+    """Set top-level fields on an existing report (e.g. the run diagnostics)."""
+    await collections.reports().update_one({"investigation_id": investigation_id}, {"$set": fields})
 
 
 async def get_report(investigation_id: str) -> Optional[dict]:
-    """Fetch the report for an investigation."""
-    return await collections.reports().find_one(
-        {"investigation_id": investigation_id}
-    )
+    return await collections.reports().find_one({"investigation_id": investigation_id})

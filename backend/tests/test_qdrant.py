@@ -32,6 +32,18 @@ def test_qdrant_connection():
     )
 
 
+def test_qdrant_point_ids_are_stable():
+    """Retries should upsert the same chunk IDs instead of creating duplicates."""
+    from app.services.vector_store import _point_id
+
+    first = _point_id("usr_test001", "inv_123", "E-008", 3)
+    second = _point_id("usr_test001", "inv_123", "E-008", 3)
+    different_chunk = _point_id("usr_test001", "inv_123", "E-008", 4)
+
+    assert first == second
+    assert first != different_chunk
+
+
 def test_store_evidence_chunks(test_investigation_id):
     """Test storing evidence text chunks in Qdrant Cloud."""
     from app.services.vector_store import store_evidence_chunks

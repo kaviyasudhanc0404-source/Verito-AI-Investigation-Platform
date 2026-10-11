@@ -1,17 +1,40 @@
 import { useRef, useState } from "react";
-import { Paperclip, Mic, ArrowUp, X, FileText, Image as ImageIcon, Music, MapPin, MessageSquare } from "lucide-react";
+import {
+  Paperclip,
+  Mic,
+  ArrowUp,
+  X,
+  FileText,
+  Image as ImageIcon,
+  Music,
+  MapPin,
+  MessageSquare,
+  Table,
+  Video,
+} from "lucide-react";
 import type { EvidenceItem } from "@/lib/investigation";
 
+/** Same categories as the backend (utils/file_detector.py); the server's value replaces this after upload. */
 function kindOf(name: string): EvidenceItem["kind"] {
   const n = name.toLowerCase();
-  if (/\.(png|jpe?g|webp|gif|heic)$/.test(n)) return "image";
-  if (/\.(mp3|wav|m4a|ogg)$/.test(n)) return "audio";
-  if (/\.(txt|md|pdf|docx?)$/.test(n)) return "doc";
+  if (/\.(png|jpe?g|webp|gif|heic|bmp|tiff?)$/.test(n)) return "image";
+  if (/\.(mp3|wav|m4a|ogg|flac)$/.test(n)) return "audio";
+  if (/\.(mp4|mov|avi|mkv)$/.test(n)) return "video";
+  if (/\.(eml|msg)$/.test(n)) return "chat";
+  if (/\.(txt|csv|xlsx?|json|xml)$/.test(n)) return "text";
   return "doc";
 }
 
-const iconFor = (k: EvidenceItem["kind"]) =>
-  ({ image: ImageIcon, audio: Music, doc: FileText, text: FileText, chat: MessageSquare, map: MapPin })[k];
+const ICONS: Record<EvidenceItem["kind"], typeof FileText> = {
+  image: ImageIcon,
+  audio: Music,
+  video: Video,
+  doc: FileText,
+  text: Table,
+  chat: MessageSquare,
+  map: MapPin,
+};
+const iconFor = (k: EvidenceItem["kind"]) => ICONS[k];
 
 export function Composer({
   onSubmit,
@@ -126,10 +149,11 @@ export function Composer({
           <button
             type="button"
             onClick={() => setListening((v) => !v)}
-            className={`grid h-9 w-9 place-items-center rounded-full transition ${listening
+            className={`grid h-9 w-9 place-items-center rounded-full transition ${
+              listening
                 ? "bg-[color:var(--crimson)]/20 text-[color:var(--crimson-glow)] animate-pulse-node"
                 : "text-foreground/70 hover:bg-white/5 hover:text-foreground"
-              }`}
+            }`}
             aria-label="Voice input"
           >
             <Mic className="h-4 w-4" />

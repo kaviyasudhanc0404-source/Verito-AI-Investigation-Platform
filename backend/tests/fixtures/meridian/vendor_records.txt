@@ -1,0 +1,24 @@
+[Excel Evidence: vendor_records.xlsx]
+
+[Sheet: Vendor Master]
+Columns: Vendor ID | Vendor Name | Vendor Type | Registration Date | Empanelment Date | Contact Person | Email
+Total rows: 3
+
+[Row 1] Vendor ID: MIL-VEN-2231 | Vendor Name: SVK Steel Traders | Vendor Type: Materials Supplier | Registration Date: 18-Mar-2019 | Empanelment Date: Since 2019 | Contact Person: S. Vijay Kumar | Email: accounts@svksteel.in
+[Row 2] Vendor ID: MIL-VEN-1187 | Vendor Name: Anand Electricals & Hardware | Vendor Type: Materials Supplier | Registration Date: 02-Jul-2017 | Empanelment Date: Since 2017 | Contact Person: R. Anand | Email: sales@anandelectricals.in
+[Row 3] Vendor ID: MIL-VEN-3309 | Vendor Name: Kovai Building Solutions | Vendor Type: Civil Works Contractor | Registration Date: 05-Feb-2026 | Empanelment Date: 20-Feb-2026 | Contact Person: T. Rajkumar | Email: info@kovaibuilding.in
+
+[Sheet: Vendor Bank Details]
+Columns: Vendor ID | Vendor Name | Bank Name | Account Number | Effective Date | Last Updated
+Total rows: 1
+
+[Row 1] Vendor ID: MIL-VEN-3309 | Vendor Name: Kovai Building Solutions | Bank Name: Karur Vysya Bank | Account Number: 1145500098765 | Effective Date: 20-Feb-2026 | Last Updated: 04-Mar-2026
+
+[Sheet: Vendor Onboarding Log]
+Columns: Vendor ID | Event Date | Event Type | Updated By Employee ID
+Total rows: 4
+
+[Row 1] Vendor ID: MIL-VEN-2231 | Event Date: 18-Mar-2019 | Event Type: Vendor Empanelment | Updated By Employee ID: MIL-EMP-0203
+[Row 2] Vendor ID: MIL-VEN-1187 | Event Date: 02-Jul-2017 | Event Type: Vendor Empanelment | Updated By Employee ID: MIL-EMP-0203
+[Row 3] Vendor ID: MIL-VEN-3309 | Event Date: 20-Feb-2026 | Event Type: Vendor Empanelment | Updated By Employee ID: MIL-EMP-0587
+[Row 4] Vendor ID: MIL-VEN-3309 | Event Date: 04-Mar-2026 | Event Type: Bank Detail Update | Updated By Employee ID: MIL-EMP-0812

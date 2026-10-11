@@ -36,6 +36,7 @@ settings = get_settings()
 
 # Module-level singleton Qdrant client
 _client: Any | None = None
+_POINT_ID_NAMESPACE = uuid.UUID("6f60f3a2-47d0-4e5e-9c3d-cb2cfe80ec5f")
 
 
 def _get_client() -> Any:
@@ -202,7 +203,7 @@ def store_evidence_chunks(
 
     points = [
         PointStruct(
-            id=str(uuid.uuid4()),           # unique UUID per chunk
+            id=_point_id(user_id, investigation_id, evidence_id, i),
             vector=embeddings[i],
             payload={
                 "user_id": user_id,
@@ -223,6 +224,12 @@ def store_evidence_chunks(
     )
 
     return len(points)
+
+
+def _point_id(user_id: str, investigation_id: str, evidence_id: str, chunk_index: int) -> str:
+    """Stable point IDs make repeated upserts idempotent after network retries."""
+    raw = f"{user_id}|{investigation_id}|{evidence_id}|{chunk_index}"
+    return str(uuid.uuid5(_POINT_ID_NAMESPACE, raw))
 
 
 def query_evidence(

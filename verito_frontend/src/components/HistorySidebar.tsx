@@ -56,7 +56,9 @@ function EditProfileModal({
 
   // close on Escape
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -65,20 +67,41 @@ function EditProfileModal({
     e.preventDefault();
     setError(null);
 
-    if (!name.trim()) { setError("Name cannot be empty."); return; }
-    if (newPw && newPw.length < 8) { setError("New password must be at least 8 characters."); return; }
-    if (newPw && newPw !== confirmPw) { setError("Passwords do not match."); return; }
-    if (newPw && !currentPw) { setError("Enter your current password to change it."); return; }
-
-    setSaving(true);
-    try {
-      // Call update API — gracefully ignore 404 if endpoint not yet implemented
-      await authApi.updateProfile({ name: name.trim(), email: email.trim(), current_password: currentPw || undefined, new_password: newPw || undefined });
-    } catch {
-      // silently ignore backend errors — update locally regardless
+    if (!name.trim()) {
+      setError("Name cannot be empty.");
+      return;
+    }
+    if (newPw && newPw.length < 8) {
+      setError("New password must be at least 8 characters.");
+      return;
+    }
+    if (newPw && newPw !== confirmPw) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if (newPw && !currentPw) {
+      setError("Enter your current password to change it.");
+      return;
     }
 
-    const updated: StoredUser = { user_id: user?.user_id ?? "", name: name.trim(), email: email.trim() };
+    setSaving(true);
+    let saved;
+    try {
+      saved = await authApi.updateProfile({
+        name: name.trim(),
+        email: email.trim(),
+        current_password: currentPw || undefined,
+        new_password: newPw || undefined,
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not save your profile. Please try again.",
+      );
+      setSaving(false);
+      return;
+    }
+
+    const updated: StoredUser = { user_id: saved.user_id, name: saved.name, email: saved.email };
     setUser(updated);
     onSave(updated);
     setSuccess(true);
@@ -91,7 +114,9 @@ function EditProfileModal({
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 sm:p-6"
       style={{ background: "rgba(0,0,0,0.75)", backdropFilter: "blur(8px)" }}
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
     >
       <div
         className="relative w-full max-w-md overflow-hidden rounded-3xl border border-white/10 bg-[#0f0f12] shadow-[0_0_80px_rgba(0,0,0,0.8)]"
@@ -131,7 +156,9 @@ function EditProfileModal({
 
           {/* Name */}
           <div className="space-y-1.5">
-            <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">FULL NAME</label>
+            <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">
+              FULL NAME
+            </label>
             <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 focus-within:border-[color:var(--crimson)]/50 transition">
               <User className="h-4 w-4 shrink-0 text-[color:var(--crimson-glow)]" />
               <input
@@ -145,7 +172,9 @@ function EditProfileModal({
 
           {/* Email */}
           <div className="space-y-1.5">
-            <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">EMAIL ADDRESS</label>
+            <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">
+              EMAIL ADDRESS
+            </label>
             <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 focus-within:border-[color:var(--crimson)]/50 transition">
               <Mail className="h-4 w-4 shrink-0 text-[color:var(--crimson-glow)]" />
               <input
@@ -161,13 +190,17 @@ function EditProfileModal({
           {/* Divider */}
           <div className="flex items-center gap-3 py-1">
             <span className="h-px flex-1 bg-white/5" />
-            <span className="font-mono text-[10px] tracking-[0.3em] text-foreground/30">CHANGE PASSWORD</span>
+            <span className="font-mono text-[10px] tracking-[0.3em] text-foreground/30">
+              CHANGE PASSWORD
+            </span>
             <span className="h-px flex-1 bg-white/5" />
           </div>
 
           {/* Current Password */}
           <div className="space-y-1.5">
-            <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">CURRENT PASSWORD</label>
+            <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">
+              CURRENT PASSWORD
+            </label>
             <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 focus-within:border-[color:var(--crimson)]/50 transition">
               <Lock className="h-4 w-4 shrink-0 text-[color:var(--crimson-glow)]" />
               <input
@@ -183,7 +216,9 @@ function EditProfileModal({
           {/* New Password */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">NEW PASSWORD</label>
+              <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">
+                NEW PASSWORD
+              </label>
               <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 focus-within:border-[color:var(--crimson)]/50 transition">
                 <Lock className="h-3.5 w-3.5 shrink-0 text-[color:var(--crimson-glow)]" />
                 <input
@@ -196,7 +231,9 @@ function EditProfileModal({
               </div>
             </div>
             <div className="space-y-1.5">
-              <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">CONFIRM</label>
+              <label className="font-mono text-[10px] tracking-[0.25em] text-foreground/50">
+                CONFIRM
+              </label>
               <div className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 focus-within:border-[color:var(--crimson)]/50 transition">
                 <Lock className="h-3.5 w-3.5 shrink-0 text-[color:var(--crimson-glow)]" />
                 <input
@@ -308,10 +345,7 @@ export function HistorySidebar({
       preferredX + menuWidth + gap <= window.innerWidth
         ? preferredX
         : Math.max(gap, Math.min(fallbackX, window.innerWidth - menuWidth - gap));
-    const y = Math.max(
-      gap,
-      Math.min(rect.top, window.innerHeight - menuHeight - gap),
-    );
+    const y = Math.max(gap, Math.min(rect.top, window.innerHeight - menuHeight - gap));
     setContextMenu({ caseId, x, y });
   };
 
@@ -334,17 +368,18 @@ export function HistorySidebar({
 
   const initials = user?.name
     ? user.name
-      .split(" ")
-      .map((w) => w[0])
-      .join("")
-      .slice(0, 2)
-      .toUpperCase()
+        .split(" ")
+        .map((w) => w[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
     : "?";
 
   return (
     <aside
-      className={`glass-panel relative flex h-full flex-col overflow-visible transition-[width] duration-300 ease-out ${open ? "w-72" : "w-14"
-        }`}
+      className={`glass-panel relative flex h-full flex-col overflow-visible transition-[width] duration-300 ease-out ${
+        open ? "w-72" : "w-14"
+      }`}
     >
       {/* ── Edit Profile Modal ────────────────────────────────── */}
       {editModalOpen && (
@@ -379,8 +414,9 @@ export function HistorySidebar({
         <button
           onClick={onNew}
           aria-label="New investigation"
-          className={`group flex w-full items-center gap-2 rounded-lg border border-[color:var(--crimson)]/30 bg-[color:var(--crimson)]/10 text-sm font-medium text-[color:var(--crimson-glow)] transition hover:bg-[color:var(--crimson)]/20 ${open ? "px-3 py-2 justify-start" : "h-10 justify-center"
-            }`}
+          className={`group flex w-full items-center gap-2 rounded-lg border border-[color:var(--crimson)]/30 bg-[color:var(--crimson)]/10 text-sm font-medium text-[color:var(--crimson-glow)] transition hover:bg-[color:var(--crimson)]/20 ${
+            open ? "px-3 py-2 justify-start" : "h-10 justify-center"
+          }`}
         >
           <Plus className="h-4 w-4 shrink-0" />
           {open && <span className="truncate">New investigation</span>}
@@ -456,8 +492,9 @@ export function HistorySidebar({
         <button
           onClick={() => setProfileOpen((v) => !v)}
           aria-label="Profile menu"
-          className={`flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-white/5 ${profileOpen ? "bg-white/5" : ""
-            }`}
+          className={`flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-white/5 ${
+            profileOpen ? "bg-white/5" : ""
+          }`}
         >
           {/* Avatar */}
           <div className="relative shrink-0">
@@ -666,13 +703,16 @@ function CaseItem({
         <>
           <button
             onClick={() => onSelect(c.id)}
-            className={`flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left text-sm transition ${active ? "bg-white/10 text-foreground" : "text-foreground/80 hover:bg-white/5"
-              }`}
+            className={`flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left text-sm transition ${
+              active ? "bg-white/10 text-foreground" : "text-foreground/80 hover:bg-white/5"
+            }`}
           >
             <MessageSquareText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[color:var(--crimson-glow)]" />
             <span className="min-w-0 flex-1 pr-6">
               <span className="flex items-center gap-1">
-                {pinned && <Pin className="h-2.5 w-2.5 shrink-0 text-[color:var(--gold,#c9a84c)] opacity-70" />}
+                {pinned && (
+                  <Pin className="h-2.5 w-2.5 shrink-0 text-[color:var(--gold,#c9a84c)] opacity-70" />
+                )}
                 <span className="block truncate">{c.title || "Untitled case"}</span>
               </span>
               <span className="mt-0.5 block truncate font-mono text-[10px] tracking-widest text-foreground/40">
@@ -730,10 +770,11 @@ function ContextAction({
         }
         onClick();
       }}
-      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${danger
-        ? "text-red-400/80 hover:bg-red-500/10 hover:text-red-400"
-        : "text-foreground/80 hover:bg-white/5 hover:text-foreground"
-        }`}
+      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${
+        danger
+          ? "text-red-400/80 hover:bg-red-500/10 hover:text-red-400"
+          : "text-foreground/80 hover:bg-white/5 hover:text-foreground"
+      }`}
     >
       <span className={danger ? "text-red-400" : "text-[color:var(--crimson-glow)]"}>{icon}</span>
       <div className="min-w-0 flex-1 text-left">

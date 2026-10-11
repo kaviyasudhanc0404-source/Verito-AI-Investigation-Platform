@@ -14,3 +14,7 @@ class EvidenceItemResponse(BaseModel):
     name: str       # original filename
     kind: Literal["doc", "image", "audio", "text", "chat", "map", "video"]
     size: Optional[int] = None
+
+    @classmethod
+    def from_doc(cls, doc: dict) -> "EvidenceItemResponse":
+        return cls(id=doc["evidence_id"], name=doc["filename"], kind=doc["kind"], size=doc.get("size_bytes"))

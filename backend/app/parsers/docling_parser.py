@@ -26,7 +26,7 @@ Why Docling?
 Image Enrichment:
   Docling exports embedded images as `<!-- image -->` Markdown placeholders.
   For formats that support embedded images (PDF, DOCX, PPTX), this module:
-    1. Extracts images via document_image_extractor (PyMuPDF / python-docx / python-pptx)
+    1. Extracts images via document_image_extractor (pypdfium2 / python-docx / python-pptx)
     2. Runs EasyOCR (visible text) + Gemini (scene description) on each image
     3. Replaces `<!-- image -->` placeholders with the extracted content
   This ensures image-heavy documents contribute meaningful content to the
@@ -48,6 +48,16 @@ DoclingFormat = Literal["pdf", "docx", "pptx", "html", "md"]
 
 # Pattern matching the image placeholder Docling emits
 _IMAGE_PLACEHOLDER = re.compile(r"<!-- image -->")
+_PAGE_BREAK = "<!-- page break -->"
+
+
+def _with_page_markers(markdown_text: str) -> str:
+    """Replace Docling page breaks with numbered "[Page N]" lines (single-page documents get none)."""
+    pages = markdown_text.split(_PAGE_BREAK)
+    if len(pages) == 1:
+        return markdown_text
+    numbered = (f"[Page {number}]\n\n{page.strip()}" for number, page in enumerate(pages, start=1) if page.strip())
+    return "\n\n".join(numbered)
 
 
 def parse_with_docling(
@@ -77,8 +87,13 @@ def parse_with_docling(
         fmt:        Docling format hint — one of "pdf", "docx", "pptx", "html", "md".
 
     Returns:
-        Structured Markdown string.  Never empty — falls back to an error note
-        if Docling fails so the pipeline can continue.
+        Structured Markdown string, with "[Page N]" marker lines for multi-page
+        documents (so records and quotes can cite their page). Returns "" when the
+        document has no extractable content.
+
+    Raises:
+        ValueError    for an unsupported format
+        RuntimeError  when Docling cannot parse the file (the collector reports it)
     """
     try:
         from docling.document_converter import DocumentConverter
@@ -101,7 +116,7 @@ def parse_with_docling(
 
     input_format = _FMT_MAP.get(fmt)
     if input_format is None:
-        return f"[Docling Parser: unsupported format '{fmt}' for {filename}]"
+        raise ValueError(f"unsupported document format '{fmt}'")
 
     # ── Write bytes to a temp file (Docling requires a file path) ────────────
     suffix = f".{fmt}" if fmt != "md" else ".md"
@@ -127,11 +142,11 @@ def parse_with_docling(
         result = converter.convert(tmp_path)
         doc = result.document
 
-        # ── Export to Markdown ────────────────────────────────────────────
-        markdown_text = doc.export_to_markdown()
+        # ── Export to Markdown, marking page boundaries ───────────────────
+        markdown_text = _with_page_markers(doc.export_to_markdown(page_break_placeholder=_PAGE_BREAK))
 
         if not markdown_text or not markdown_text.strip():
-            return f"[Docling extracted no content from {filename}]"
+            return ""
 
         # ── Enrich image placeholders with OCR + vision content ───────────
         # Works for PDF, DOCX, PPTX — skipped for HTML/MD (no embedded images)
@@ -140,7 +155,7 @@ def parse_with_docling(
         return f"[Document: {filename}]\n\n{markdown_text.strip()}"
 
     except Exception as exc:
-        return f"[Docling failed to parse {filename}: {exc}]"
+        raise RuntimeError(f"Docling could not parse the document: {exc}") from exc
 
     finally:
         # Always clean up the temp file

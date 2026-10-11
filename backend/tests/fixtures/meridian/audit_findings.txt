@@ -1,0 +1,14 @@
+[Document: audit_findings.pdf]
+
+## Section A - Audit Observations
+
+- No site delivery challan or goods-receipt note was located in the document management system for PO-2026-0355 or PO-2026-0362 at the time of this review.
+- No vendor declaration of interest form was located on file for this vendor as required under Procurement Policy MIL-POL-07, Clause 6.2.
+
+## Section B - Witness Statement 1
+
+| Witness | Meera Chandrasekaran (MIL-EMP-0812) |
+|---|---|
+| Statement Date | 20-Apr-2026 |
+
+I recall that between March and April this year, I received direct requests from Mr. Arvind Kumaraswamy asking that certain invoices from Kovai Building Solutions be processed on priority. Recorded by Divya Raghunathan, Senior Internal Auditor.

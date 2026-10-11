@@ -5,7 +5,7 @@ Request and response schemas for investigation endpoints.
 """
 
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 from pydantic import BaseModel
 
 from app.schemas.agent import AgentRunResponse
@@ -45,3 +45,8 @@ class InvestigationListItem(BaseModel):
     status: Literal["processing", "complete", "failed"]
     pinned: bool = False
     created_at: datetime
+
+    @classmethod
+    def from_doc(cls, doc: dict) -> "InvestigationListItem":
+        return cls(id=doc["_id"], title=doc["title"], status=doc["status"],
+                   pinned=doc.get("pinned", False), created_at=doc["created_at"])

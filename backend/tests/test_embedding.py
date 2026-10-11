@@ -13,7 +13,6 @@ Verifies:
 Run: pytest tests/test_embedding.py -v
 """
 
-import pytest
 
 
 def test_embedding_model_loads():

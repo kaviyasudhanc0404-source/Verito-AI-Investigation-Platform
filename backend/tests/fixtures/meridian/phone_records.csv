@@ -1,0 +1,9 @@
+Call ID,Date,Time,Caller Employee ID,Caller Name,Caller Number,Receiver,Receiver Number,Duration,Call Status
+CALL-260305-01,05-Mar-2026,09:18,MIL-EMP-0587,Arvind Kumaraswamy,+91-98XXXX1201,Vendor Contact - KBS,+91-97XXXX4428,12 min,Completed
+CALL-260308-02,08-Mar-2026,16:42,MIL-EMP-0587,Arvind Kumaraswamy,+91-98XXXX1201,Vendor Contact - KBS,+91-97XXXX4428,18 min,Completed
+CALL-260314-03,14-Mar-2026,11:07,MIL-EMP-0761,Sanjay Bhaskaran,+91-98XXXX3814,Vendor Contact - KBS,+91-97XXXX4428,7 min,Completed
+CALL-260321-04,21-Mar-2026,15:26,MIL-EMP-0587,Arvind Kumaraswamy,+91-98XXXX1201,Vendor Contact - KBS,+91-97XXXX4428,9 min,Completed
+CALL-260329-05,29-Mar-2026,10:11,MIL-EMP-0587,Arvind Kumaraswamy,+91-98XXXX1201,Vendor Contact - KBS,+91-97XXXX4428,14 min,Completed
+CALL-260402-06,02-Apr-2026,13:34,MIL-EMP-0761,Sanjay Bhaskaran,+91-98XXXX3814,Vendor Contact - AEH,+91-96XXXX5176,6 min,Completed
+CALL-260409-07,09-Apr-2026,17:03,MIL-EMP-0587,Arvind Kumaraswamy,+91-98XXXX1201,Vendor Contact - KBS,+91-97XXXX4428,21 min,Completed
+CALL-260411-08,11-Apr-2026,09:52,MIL-EMP-0587,Arvind Kumaraswamy,+91-98XXXX1201,Vendor Contact - KBS,+91-97XXXX4428,11 min,Completed

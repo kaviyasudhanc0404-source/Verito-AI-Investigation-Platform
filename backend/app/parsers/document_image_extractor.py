@@ -6,7 +6,7 @@ Unified image extractor for all Docling-supported document formats.
 Extracts embedded images from:
   PPTX  → python-pptx  (slide shapes, grouped shapes, placeholders)
   DOCX  → python-docx  (inline images from document relationships)
-  PDF   → PyMuPDF/fitz (embedded images per page)
+  PDF   → pypdfium2 (embedded images per page; installed with Docling)
   HTML  → not applicable (external URLs, not embedded binary data)
   MD    → not applicable (external URLs, not embedded binary data)
 
@@ -113,7 +113,6 @@ def _deduplicate(images: list[ExtractedImage]) -> list[ExtractedImage]:
 def _extract_from_pptx(file_bytes: bytes) -> list[ExtractedImage]:
     """Extract images from a PowerPoint file using python-pptx."""
     from pptx import Presentation
-    from pptx.shapes.picture import Picture
 
     prs = Presentation(io.BytesIO(file_bytes))
     images: list[ExtractedImage] = []
@@ -191,38 +190,28 @@ def _extract_from_docx(file_bytes: bytes) -> list[ExtractedImage]:
     return images
 
 
-# ── PDF extraction (PyMuPDF / fitz) ──────────────────────────────────────────
+# ── PDF extraction (pypdfium2, installed with Docling) ───────────────────────
 
 def _extract_from_pdf(file_bytes: bytes) -> list[ExtractedImage]:
-    """Extract images from a PDF using PyMuPDF (fitz)."""
-    import fitz  # PyMuPDF
+    """Extract embedded images from a PDF with pypdfium2, as PNG bytes."""
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_raw
 
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    pdf = pdfium.PdfDocument(file_bytes)
     images: list[ExtractedImage] = []
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        image_list = page.get_images(full=True)
-
-        for img_info in image_list:
-            xref = img_info[0]
-
-            try:
-                base_image = doc.extract_image(xref)
-                if not base_image or not base_image.get("image"):
-                    continue
-
-                img_bytes = base_image["image"]
-                ext = base_image.get("ext", "png")
-                content_type = f"image/{ext}" if ext != "jpg" else "image/jpeg"
-
-                images.append(ExtractedImage(
-                    image_bytes=img_bytes,
-                    content_type=content_type,
-                    label=f"Page {page_num + 1} - Image (xref {xref})",
-                ))
-            except Exception as exc:
-                logger.debug("PDF: skip xref %d on page %d: %s", xref, page_num + 1, exc)
-
-    doc.close()
+    try:
+        for page_number, page in enumerate(pdf, start=1):
+            for index, obj in enumerate(page.get_objects(filter=[pdfium_raw.FPDF_PAGEOBJ_IMAGE], max_depth=3)):
+                try:
+                    buffer = io.BytesIO()
+                    obj.get_bitmap(render=False).to_pil().save(buffer, format="PNG")
+                    images.append(ExtractedImage(
+                        image_bytes=buffer.getvalue(),
+                        content_type="image/png",
+                        label=f"Page {page_number} - Image {index + 1}",
+                    ))
+                except Exception as exc:
+                    logger.debug("PDF: skip image %d on page %d: %s", index + 1, page_number, exc)
+    finally:
+        pdf.close()
     return images

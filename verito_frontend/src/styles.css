@@ -57,7 +57,7 @@
   --foreground: oklch(0.96 0.005 260);
 
   --graphite: oklch(0.18 0.012 260);
-  --surface: oklch(0.20 0.014 260 / 0.55);
+  --surface: oklch(0.2 0.014 260 / 0.55);
   --surface-2: oklch(0.24 0.014 260 / 0.65);
 
   --card: oklch(0.18 0.012 260);
@@ -98,7 +98,8 @@
   }
   html,
   body {
-    background: radial-gradient(1200px 800px at 15% -10%, oklch(0.24 0.05 22 / 0.35), transparent 60%),
+    background:
+      radial-gradient(1200px 800px at 15% -10%, oklch(0.24 0.05 22 / 0.35), transparent 60%),
       radial-gradient(1000px 700px at 100% 10%, oklch(0.22 0.03 82 / 0.18), transparent 60%),
       var(--color-background);
     color: var(--color-foreground);
@@ -175,64 +176,138 @@
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.5'/></svg>");
 }
 
-
 /* ============ Keyframes ============ */
 @keyframes scan-y {
-  0% { transform: translateY(-120%); opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { transform: translateY(320%); opacity: 0; }
+  0% {
+    transform: translateY(-120%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(320%);
+    opacity: 0;
+  }
 }
 @keyframes scan-x {
-  0% { transform: translateX(-120%); opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { transform: translateX(320%); opacity: 0; }
+  0% {
+    transform: translateX(-120%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(320%);
+    opacity: 0;
+  }
 }
 @keyframes pulse-node {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--crimson) 60%, transparent); }
-  50% { box-shadow: 0 0 0 12px transparent; }
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--crimson) 60%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 12px transparent;
+  }
 }
 @keyframes float-y {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-10px); }
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
 }
 @keyframes wordmark-reveal {
-  from { opacity: 0; transform: translateY(12px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 @keyframes laser-sweep {
-  0% { transform: translateX(-100%); opacity: 0; }
-  20% { opacity: 1; }
-  80% { opacity: 1; }
-  100% { transform: translateX(100%); opacity: 0; }
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
 }
 @keyframes draw-line {
-  from { stroke-dashoffset: var(--l, 400); }
-  to   { stroke-dashoffset: 0; }
+  from {
+    stroke-dashoffset: var(--l, 400);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 @keyframes fingerprint-scan {
-  0% { clip-path: inset(0 0 100% 0); }
-  100% { clip-path: inset(0 0 0 0); }
+  0% {
+    clip-path: inset(0 0 100% 0);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
 }
 
-.animate-scan-y { animation: scan-y 3.5s ease-in-out infinite; }
-.animate-scan-y-once { animation: scan-y 2.4s ease-in-out 0.4s 1 both; }
-.animate-scan-x { animation: scan-x 4s ease-in-out infinite; }
-.animate-pulse-node { animation: pulse-node 2s ease-out infinite; }
-.animate-float-y { animation: float-y 6s ease-in-out infinite; }
-.animate-wordmark { animation: wordmark-reveal 1.2s cubic-bezier(0.2,0.7,0.2,1) both; }
-.animate-laser { animation: laser-sweep 2.2s ease-in-out infinite; }
-.animate-laser-once { animation: laser-sweep 2.2s ease-in-out 0.6s 1 both; }
+.animate-scan-y {
+  animation: scan-y 3.5s ease-in-out infinite;
+}
+.animate-scan-y-once {
+  animation: scan-y 2.4s ease-in-out 0.4s 1 both;
+}
+.animate-scan-x {
+  animation: scan-x 4s ease-in-out infinite;
+}
+.animate-pulse-node {
+  animation: pulse-node 2s ease-out infinite;
+}
+.animate-float-y {
+  animation: float-y 6s ease-in-out infinite;
+}
+.animate-wordmark {
+  animation: wordmark-reveal 1.2s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.animate-laser {
+  animation: laser-sweep 2.2s ease-in-out infinite;
+}
+.animate-laser-once {
+  animation: laser-sweep 2.2s ease-in-out 0.6s 1 both;
+}
 
 /* Pinned paper card (evidence board note) */
 @keyframes pin-tilt-in {
-  0% { opacity: 0; transform: translateY(20px) rotate(var(--tilt, -2deg)) scale(0.96); }
-  100% { opacity: 1; transform: translateY(0) rotate(var(--tilt, -2deg)) scale(1); }
+  0% {
+    opacity: 0;
+    transform: translateY(20px) rotate(var(--tilt, -2deg)) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) rotate(var(--tilt, -2deg)) scale(1);
+  }
 }
 .pin-note {
-  background:
-    linear-gradient(180deg, oklch(0.96 0.02 85 / 0.96), oklch(0.9 0.03 82 / 0.94));
+  background: linear-gradient(180deg, oklch(0.96 0.02 85 / 0.96), oklch(0.9 0.03 82 / 0.94));
   color: oklch(0.24 0.02 60);
   border: 1px solid oklch(0.75 0.05 82 / 0.5);
   box-shadow:
@@ -242,14 +317,20 @@
   animation: pin-tilt-in 0.7s ease-out both;
 }
 .pin-note.dark-note {
-  background:
-    linear-gradient(180deg, oklch(0.22 0.01 260 / 0.9), oklch(0.18 0.012 260 / 0.9));
+  background: linear-gradient(180deg, oklch(0.22 0.01 260 / 0.9), oklch(0.18 0.012 260 / 0.9));
   color: oklch(0.94 0.005 260);
   border: 1px solid oklch(1 0 0 / 0.08);
 }
 .pin-thumbtack {
-  width: 22px; height: 22px; border-radius: 999px;
-  background: radial-gradient(circle at 35% 30%, oklch(0.85 0.16 22), oklch(0.5 0.22 22) 60%, oklch(0.3 0.14 22) 100%);
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: radial-gradient(
+    circle at 35% 30%,
+    oklch(0.85 0.16 22),
+    oklch(0.5 0.22 22) 60%,
+    oklch(0.3 0.14 22) 100%
+  );
   box-shadow:
     0 2px 4px oklch(0 0 0 / 0.6),
     0 0 12px oklch(0.66 0.24 22 / 0.6),
@@ -257,7 +338,9 @@
 }
 
 .evidence-card {
-  transition: transform 0.35s ease, box-shadow 0.35s ease;
+  transition:
+    transform 0.35s ease,
+    box-shadow 0.35s ease;
 }
 .evidence-card:hover {
   transform: rotate(0deg) translateY(-4px) !important;
@@ -285,4 +368,3 @@
 .sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
   background: oklch(1 0 0 / 0.15);
 }
-

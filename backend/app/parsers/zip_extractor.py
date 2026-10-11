@@ -1,144 +1,60 @@
 """
 parsers/zip_extractor.py
 -------------------------
-Extract and parse evidence from ZIP archive files (.zip).
+Extract and parse every supported file inside a ZIP archive (in memory).
 
-Strategy:
-  1. Open the ZIP archive in memory (no disk write)
-  2. List all contained files
-  3. For each file inside the ZIP:
-     a. Detect its type using file_detector
-     b. Dispatch to the appropriate parser
-     c. Collect the extracted text with a file-header label
-  4. Return all content concatenated
-
-Nested ZIPs are supported (up to 2 levels deep) to avoid infinite recursion.
-
-Files that cannot be parsed (unsupported types, binary blobs, audio/video)
-are listed but their content is skipped.
+Members are parsed with the shared dispatch in app.parsers. Nested archives are
+followed up to _MAX_DEPTH, and size/count limits guard against zip bombs.
+Audio/video members are listed but not transcribed (they need a file on disk).
 """
 
 from __future__ import annotations
 
-import zipfile
 import io
+import zipfile
 
-_MAX_DEPTH = 2  # Maximum ZIP nesting depth
-
-# Docling handles all document types through one function
-_DOCLING_FMT: dict[str, str] = {
-    "pdf":      "pdf",
-    "docx":     "docx",
-    "doc":      "docx",
-    "pptx":     "pptx",
-    "html":     "html",
-    "markdown": "md",
-}
-
-
-def _parse_inner_file(
-    file_bytes: bytes,
-    inner_filename: str,
-    depth: int = 0,
-) -> str:
-    """
-    Detect and parse a single file extracted from a ZIP.
-
-    Args:
-        file_bytes:      Raw bytes of the extracted file.
-        inner_filename:  Filename inside the ZIP (used for type detection).
-        depth:           Current ZIP nesting depth (prevents infinite recursion).
-
-    Returns:
-        Extracted text string or a skip notice.
-    """
-    from app.utils.file_detector import detect_file_type
-
-    file_type = detect_file_type(inner_filename)
-
-    # Docling handles PDF / DOCX / PPTX / HTML / Markdown in one call
-    if file_type in _DOCLING_FMT:
-        from app.parsers.docling_parser import parse_with_docling
-        return parse_with_docling(file_bytes, inner_filename, fmt=_DOCLING_FMT[file_type])
-
-    if file_type == "image":
-        from app.parsers.image_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "email":
-        from app.parsers.email_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "msg":
-        from app.parsers.msg_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "csv":
-        from app.parsers.csv_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "excel":
-        from app.parsers.excel_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "xml":
-        from app.parsers.xml_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "chat":
-        from app.parsers.chat_parser import parse
-        return parse(file_bytes, inner_filename)
-
-    if file_type == "zip" and depth < _MAX_DEPTH:
-        # Recursive ZIP extraction (limited depth)
-        return parse(file_bytes, inner_filename, _depth=depth + 1)
-
-    if file_type in {"txt"}:
-        try:
-            return file_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            return file_bytes.decode("latin-1", errors="replace")
-
-    return f"[Skipped: {inner_filename} (type={file_type} — not supported for text extraction)]"
+_MAX_DEPTH = 2
+_MAX_MEMBERS = 500
+_MAX_TOTAL_BYTES = 200 * 1024 * 1024
 
 
 def parse(file_bytes: bytes, filename: str = "archive.zip", _depth: int = 0) -> str:
-    """
-    Extract all text evidence from a ZIP archive.
+    """Parse every member. Raises ValueError for an invalid or oversized archive; problems with
+    individual members become parse warnings so nothing is skipped silently."""
+    from app.parsers import parse_bytes, parse_warning
+    from app.utils.file_detector import detect_file_type
 
-    Args:
-        file_bytes: Raw .zip bytes.
-        filename:   Original filename (for context header).
-        _depth:     Internal depth counter (do not set manually).
-
-    Returns:
-        Concatenated text from all parseable files inside the ZIP.
-    """
     try:
-        zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+        archive = zipfile.ZipFile(io.BytesIO(file_bytes))
     except zipfile.BadZipFile as exc:
-        return f"[ZIP Evidence: {filename}]\n(Invalid ZIP file: {exc})"
+        raise ValueError(f"not a valid ZIP archive ({exc})") from exc
 
-    output_lines: list[str] = [f"[ZIP Archive Evidence: {filename}]"]
-
-    with zf:
-        members = [m for m in zf.infolist() if not m.is_dir()]
-
+    with archive:
+        all_members = [m for m in archive.infolist() if not m.is_dir()]
+        members = all_members[:_MAX_MEMBERS]
         if not members:
-            return f"[ZIP Archive Evidence: {filename}]\n(Archive contains no files)"
+            return ""
+        if sum(m.file_size for m in members) > _MAX_TOTAL_BYTES:
+            raise ValueError("the archive's uncompressed size exceeds the safety limit")
 
-        output_lines.append(f"Contains {len(members)} file(s):")
-        for m in members:
-            output_lines.append(f"  - {m.filename} ({m.file_size:,} bytes)")
-        output_lines.append("")
+        lines = [f"[ZIP Archive Evidence: {filename}]", f"Contains {len(all_members)} file(s):"]
+        lines += [f"  - {m.filename} ({m.file_size:,} bytes)" for m in members]
+        if len(all_members) > _MAX_MEMBERS:
+            lines.append(parse_warning(f"only the first {_MAX_MEMBERS} of {len(all_members)} files were read"))
 
         for member in members:
-            output_lines.append(f"\n── Extracted: {member.filename} ──")
+            file_type = detect_file_type(member.filename)
+            lines.append(f"\n[Archive Member: {member.filename}]")
+            if file_type == "zip" and _depth >= _MAX_DEPTH:
+                lines.append(parse_warning(f"nested archive {member.filename} skipped (maximum depth reached)"))
+                continue
             try:
-                inner_bytes = zf.read(member.filename)
-                extracted_text = _parse_inner_file(inner_bytes, member.filename, depth=_depth)
-                output_lines.append(extracted_text.strip())
+                inner = archive.read(member.filename)
+                text = parse(inner, member.filename, _depth + 1) if file_type == "zip" \
+                    else parse_bytes(inner, member.filename, file_type)
             except Exception as exc:
-                output_lines.append(f"[Error reading {member.filename}: {exc}]")
+                lines.append(parse_warning(f"{member.filename} could not be read ({exc})"))
+                continue
+            lines.append(text.strip() or parse_warning(f"no text extracted from {member.filename} ({file_type})"))
 
-    return "\n".join(output_lines).strip()
+    return "\n".join(lines).strip()

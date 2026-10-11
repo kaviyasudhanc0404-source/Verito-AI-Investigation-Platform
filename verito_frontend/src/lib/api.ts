@@ -6,6 +6,7 @@
  */
 
 import { getToken, clearToken } from "./auth-store";
+import type { FinalReport } from "./investigation";
 
 export const API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://localhost:8000/api";
@@ -39,11 +40,7 @@ async function request<T>(
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method,
     headers,
-    body: isFormData
-      ? (body as FormData)
-      : body
-        ? JSON.stringify(body)
-        : undefined,
+    body: isFormData ? (body as FormData) : body ? JSON.stringify(body) : undefined,
   });
 
   const isLoginAttempt =
@@ -59,8 +56,13 @@ async function request<T>(
     let detail = `HTTP ${res.status}`;
     try {
       const err = await res.json();
-      detail = err.detail ?? detail;
-    } catch {}
+      // FastAPI validation errors (422) return a list of { msg } objects.
+      detail = Array.isArray(err.detail)
+        ? err.detail.map((d: { msg?: string }) => d.msg ?? "").join("; ")
+        : (err.detail ?? detail);
+    } catch {
+      // Non-JSON error body — keep the HTTP status text.
+    }
     throw new ApiError(res.status, detail);
   }
 
@@ -77,13 +79,16 @@ export const authApi = {
   login: (email: string, password: string) =>
     request<TokenResponse>("POST", "/auth/login", { email, password }),
 
-  googleLogin: (id_token: string) =>
-    request<TokenResponse>("POST", "/auth/google", { id_token }),
+  googleLogin: (id_token: string) => request<TokenResponse>("POST", "/auth/google", { id_token }),
 
   me: () => request<UserResponse>("GET", "/auth/me"),
 
-  updateProfile: (data: { name?: string; email?: string; current_password?: string; new_password?: string }) =>
-    request<UserResponse>("PATCH", "/auth/me", data),
+  updateProfile: (data: {
+    name?: string;
+    email?: string;
+    current_password?: string;
+    new_password?: string;
+  }) => request<UserResponse>("PATCH", "/auth/me", data),
 };
 
 // ── Investigations ─────────────────────────────────────────────────────────────
@@ -94,11 +99,9 @@ export const investigationsApi = {
   create: (title: string, prompt: string) =>
     request<InvestigationResponse>("POST", "/investigations", { title, prompt }),
 
-  get: (id: string) =>
-    request<InvestigationResponse>("GET", `/investigations/${id}`),
+  get: (id: string) => request<InvestigationResponse>("GET", `/investigations/${id}`),
 
-  delete: (id: string) =>
-    request<void>("DELETE", `/investigations/${id}`),
+  delete: (id: string) => request<void>("DELETE", `/investigations/${id}`),
 
   update: (id: string, data: { title?: string; pinned?: boolean }) =>
     request<InvestigationListItem>("PATCH", `/investigations/${id}`, data),
@@ -135,6 +138,28 @@ export const chatApi = {
     request<ChatMessageResponse[]>("GET", `/chat/${investigationId}`),
 };
 
+// ── Reports ────────────────────────────────────────────────────────────────────
+
+export type ReportFormat = "pdf" | "docx" | "json";
+
+export const reportsApi = {
+  /** Download the saved report as a file (triggers the browser's save dialog). */
+  download: async (investigationId: string, format: ReportFormat): Promise<void> => {
+    const res = await fetch(`${API_BASE_URL}/reports/${investigationId}/export/${format}`, {
+      headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+    });
+    if (!res.ok) throw new ApiError(res.status, "Could not download the report.");
+    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1];
+    const url = URL.createObjectURL(await res.blob());
+    const link = Object.assign(document.createElement("a"), {
+      href: url,
+      download: name ?? `report.${format}`,
+    });
+    link.click();
+    URL.revokeObjectURL(url);
+  },
+};
+
 // ── Types (mirroring backend schemas) ─────────────────────────────────────────
 
 export interface TokenResponse {
@@ -168,7 +193,7 @@ export interface InvestigationResponse {
   created_at: string;
   evidence: EvidenceItemResponse[];
   runs: AgentRunResponse[];
-  report?: ReportResponse;
+  report?: FinalReport;
   chat: ChatMessageResponse[];
 }
 
@@ -184,15 +209,6 @@ export interface AgentRunResponse {
   status: "idle" | "running" | "done" | "completed_with_warnings" | "failed" | "blocked";
   lines: { kind: string; text: string }[];
   summary: string[];
-}
-
-export interface ReportResponse {
-  summary: string;
-  findings: string[];
-  timeline: { time: string; event: string; refs: string[] }[];
-  connections: { a: string; b: string; reason: string }[];
-  persons: { name: string; note: string }[];
-  unresolved: string[];
 }
 
 export interface ChatMessageResponse {

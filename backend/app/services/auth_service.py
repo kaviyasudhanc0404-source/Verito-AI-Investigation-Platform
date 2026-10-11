@@ -4,7 +4,6 @@ services/auth_service.py
 Business logic for authentication: signup, login, Google login.
 """
 
-from datetime import datetime, timezone
 from typing import Optional
 
 import firebase_admin
@@ -138,6 +137,33 @@ async def google_login(id_token: str) -> dict:
     }
     await collections.users().insert_one(user_doc)
     return user_doc
+
+
+async def update_profile(
+    user: dict,
+    *,
+    name: str | None = None,
+    email: str | None = None,
+    current_password: str | None = None,
+    new_password: str | None = None,
+) -> dict:
+    """Update name/email/password. Changing the password requires the current one."""
+    updates: dict = {}
+    if name is not None and name.strip():
+        updates["name"] = name.strip()
+    if email is not None and email != user["email"]:
+        if await _find_user_by_email(email):
+            raise ConflictException("An account with this email already exists.")
+        updates["email"] = email
+    if new_password:
+        if not user.get("password_hash"):
+            raise BadRequestException("This account signs in with Google and has no password to change.")
+        if not current_password or not verify_password(current_password, user["password_hash"]):
+            raise BadRequestException("Current password is incorrect.")
+        updates["password_hash"] = hash_password(new_password)
+    if updates:
+        await collections.users().update_one({"_id": user["_id"]}, {"$set": updates})
+    return {**user, **updates}
 
 
 async def get_user_by_id(user_id: str) -> Optional[dict]:

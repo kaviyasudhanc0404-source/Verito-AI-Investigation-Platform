@@ -1,31 +1,28 @@
 """
 services/rag_service.py
 ------------------------
-Retrieval-Augmented Generation for follow-up Q&A.
+Answer follow-up questions about an investigation.
 
-Flow:
-  User question
-  → Embed question (BAAI/bge-small-en-v1.5 with BGE query instruction)
-  → Query Qdrant Cloud (filtered to investigation)
-  → Retrieve relevant evidence chunks
-  → Build prompt with evidence context
-  → Groq LLM generates answer
-  → Answer cites evidence IDs
+question → semantic search over the case's evidence chunks (Qdrant Cloud)
+         → LLM answer grounded in those excerpts, the report's key facts and the
+           recent conversation → cited evidence IDs extracted from the answer
 """
+
+import asyncio
+import re
 
 from app.services import vector_store
 from app.services.llm_service import chat_completion
 
-# System prompt for the RAG assistant
-_SYSTEM_PROMPT = """You are VERITO, an AI forensic investigation assistant.
-You answer questions strictly based on the provided evidence excerpts.
+_SYSTEM_PROMPT = """You are VERITO, an investigation assistant. Answer using only the evidence excerpts and case facts provided.
 
 Rules:
 - Cite evidence by ID in square brackets, e.g. [E-003] or [E-003, E-007].
-- If the evidence does not support the answer, say: "The available evidence does not provide enough information to answer this question."
-- Never invent evidence, facts, or citations.
-- Be concise and precise. Use investigative language.
-- Do not speculate beyond what the evidence shows."""
+- If the evidence does not answer the question, say: "The available evidence does not provide enough information to answer this question."
+- Never invent facts or citations, and never state that anyone is guilty.
+- Answer in plain, concise English that a non-specialist can follow."""
+
+_CITATION = re.compile(r"\bE-\d{3,}\b")
 
 
 async def answer_question(
@@ -33,53 +30,33 @@ async def answer_question(
     investigation_id: str,
     user_id: str,
     chat_history: list[dict],
+    report: dict | None = None,
 ) -> tuple[str, list[str]]:
-    """
-    Answer a user question using RAG over the investigation's evidence.
-
-    Args:
-        question: The user's question text.
-        investigation_id: The investigation to search within.
-        chat_history: Previous messages [{\"role\":..., \"content\":...}].
-
-    Returns:
-        (answer_text, cited_evidence_ids)
-    """
-    # 1. Retrieve relevant evidence chunks from Qdrant Cloud
-    chunks = vector_store.query_evidence(
-        query=question,
-        investigation_id=investigation_id,
-        user_id=user_id,
-        n_results=6,
+    """Return (answer, cited evidence IDs)."""
+    chunks = await asyncio.to_thread(
+        vector_store.query_evidence, query=question, investigation_id=investigation_id, user_id=user_id, n_results=6,
     )
+    excerpts = "\n\n".join(f"[{c['evidence_id']}] {c['filename']}\n{c['text']}" for c in chunks) \
+        or "(No relevant evidence excerpts found.)"
 
-    # 2. Build the evidence context block
-    if chunks:
-        evidence_context = "\n\n".join(
-            f"[{c['evidence_id']}] {c['filename']}\n{c['text']}"
-            for c in chunks
-        )
-    else:
-        evidence_context = "(No relevant evidence found in the database.)"
-
-    # 3. Build messages for the LLM
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"EVIDENCE CONTEXT:\n{evidence_context}\n\n"
-                f"QUESTION: {question}"
-            ),
-        },
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if report:
+        messages.append({"role": "system", "content": "Case facts from the final report:\n" + _report_facts(report)})
+    messages += [
+        {"role": "assistant" if m["role"] == "verito" else "user", "content": m["content"]}
+        for m in chat_history
     ]
+    messages.append({"role": "user", "content": f"EVIDENCE EXCERPTS:\n{excerpts}\n\nQUESTION: {question}"})
 
-    # 4. Call Groq
-    answer = await chat_completion(messages, temperature=0.2, max_tokens=1024)
+    answer = await chat_completion(messages, temperature=0.2, max_tokens=1024, purpose="chat.answer")
+    return answer, sorted(set(_CITATION.findall(answer)))
 
-    # 5. Extract cited evidence IDs from the answer (e.g. [E-003])
-    import re
-    cited = list(set(re.findall(r"\[E-\d{3}\]", answer)))
-    cited = [c.strip("[]") for c in cited]
 
-    return answer, cited
+def _report_facts(report: dict) -> str:
+    lines = [report.get("summary", "")]
+    for finding in report.get("findings", [])[:8]:
+        if isinstance(finding, dict):
+            lines.append(f"- {finding.get('title')}: {finding.get('detail', '')} [{', '.join(finding.get('refs', []))}]")
+        else:
+            lines.append(f"- {finding}")
+    return "\n".join(line for line in lines if line)

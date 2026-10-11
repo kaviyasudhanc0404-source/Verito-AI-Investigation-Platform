@@ -1,387 +1,204 @@
 """
 services/chunking_service.py
-------------------------------
-Structure-aware semantic chunker for evidence processing.
+-----------------------------
+Structure-aware chunker for cleaned evidence text.
 
-Strategy (Rule-based, deterministic — recommended for VERITO):
-  Use the structural markers already present in Docling's Markdown output
-  (headings, blank-line-separated paragraphs) to split text into logical
-  chunks that respect semantic boundaries.
+Chunks must stay under the embedding model's input limit (bge-small reads ~512
+tokens), so MAX_CHUNK_CHARS is a hard cap. Structure is never broken:
 
-  Priority order:
-    1. Section boundaries  — Markdown headings (#, ##, ###) or ALL-CAPS lines
-                             or [Label] markers (e.g. [Page 1], [Sheet: X])
-    2. Paragraph boundaries — blank lines between blocks of text
-    3. Sentence boundaries  — fallback when a paragraph exceeds max_chunk_chars
-
-  This directly solves the problems seen in the previous chunking output:
-    ✅ No more mid-word / mid-sentence cuts
-    ✅ No more cross-section bleeding (Education mixed with Projects etc.)
-    ✅ Semantically coherent chunks → better embeddings → better RAG retrieval
-    ✅ No duplicate chunks (each section is processed once)
-
-Chunk size settings:
-  MAX_CHUNK_CHARS  = 1200  characters  (≈ 250-300 tokens — fits BGE context window)
-  MIN_CHUNK_CHARS  =   80  characters  (discard micro-fragments)
-  OVERLAP_SENTENCES =   1  sentence    (carried across paragraph splits only)
+  • Sections start at Markdown headings, [Label] marker lines and ALL-CAPS titles;
+    each chunk carries its section heading for context.
+  • A record line ([Row 3] …, [Record 2] …, [Message 1] …) is one atomic unit.
+  • An email record line keeps its body with it; long bodies repeat the header.
+  • A Markdown table is split by rows, and every piece repeats the table header.
+  • Prose splits on paragraphs, then sentences, then lines, then hard length.
+  • Fragments shorter than SMALL_CHUNK_CHARS (e.g. a lone heading) merge into a
+    neighbour instead of becoming their own chunk. Nothing is ever dropped for
+    being short — a one-line file still becomes one chunk.
 """
 
 from __future__ import annotations
 
 import re
 
-# ── Configuration ────────────────────────────────────────────────────────────
-MAX_CHUNK_CHARS = 1200    # Maximum characters per chunk
-MIN_CHUNK_CHARS = 80      # Minimum characters — shorter chunks are discarded
-OVERLAP_SENTENCES = 1     # Sentences to overlap at paragraph split boundaries
+MAX_CHUNK_CHARS = 1200
+SMALL_CHUNK_CHARS = 300
 
-
-# ── Heading / section-boundary detection ────────────────────────────────────
-
-# Markdown headings: # Title, ## Title, ### Title
-_HEADING = re.compile(r"^#{1,6}\s+\S", re.MULTILINE)
-
-# Docling sometimes emits headings as bullet items, e.g. "- # Project objective".
-_BOUNDARY_PREFIX = re.compile(r"^(?:[-*]\s+|\d+[.)]\s+)+")
-
-# [Label] markers produced by parsers: [Page 1], [Sheet: X], [Image Evidence: ...]
-_LABEL_MARKER = re.compile(r"^\[.+\]$", re.MULTILINE)
-
-# ALL-CAPS section headers (≥ 3 uppercase words, no lowercase)
-# e.g.  CAREER OBJECTIVE  |  WORK EXPERIENCE  |  CERTIFICATIONS
-_ALLCAPS_HEADER = re.compile(r"^[A-Z][A-Z\s\-/&]{4,}$", re.MULTILINE)
-
-# Sentence-ending punctuation (used in overlap logic)
+_HEADING = re.compile(r"^#{1,6}\s+\S")
+_LABEL_MARKER = re.compile(r"^\[[^\]]+\]$")
+_ALLCAPS_TITLE = re.compile(r"^[A-Z][A-Z0-9\s\-/&,.]{4,80}$")
+_RECORD_LINE = re.compile(r"^\[(?:Row|Record|Message|Event) \d+\]\s")
+_EMAIL_LINE = re.compile(r"^\[Email \d+\]\s")
+_TABLE_LINE = re.compile(r"^\|.*\|$")
+_TABLE_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def chunk_text(
-    text: str,
-    max_chars: int = MAX_CHUNK_CHARS,
-    min_chars: int = MIN_CHUNK_CHARS,
-) -> list[str]:
-    """
-    Split text into semantically coherent chunks using structure-aware rules.
-
-    Algorithm:
-      1. Split on section headings / label markers → logical sections
-      2. Within each section, split on paragraph boundaries (blank lines)
-      3. If a paragraph exceeds max_chars, split on sentence boundaries
-      4. Accumulate paragraphs into a chunk until max_chars is reached
-      5. Discard chunks shorter than min_chars (header-only fragments)
-
-    Args:
-        text:      Full cleaned text (Markdown from Docling or any parser).
-        max_chars: Maximum characters per chunk. Default: 1200.
-        min_chars: Minimum characters — shorter chunks are dropped. Default: 80.
-
-    Returns:
-        List of non-empty, semantically coherent text chunks.
-    """
+def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split cleaned text into embedding-safe, structure-preserving chunks."""
     if not text or not text.strip():
         return []
-
-    # Step 1: Split into top-level sections on heading / marker boundaries
-    sections = _split_into_sections(text)
-
     chunks: list[str] = []
-
-    for section_header, section_body in sections:
-        # Each section is processed independently — no cross-section bleeding
-        section_chunks = _chunk_section(section_header, section_body, max_chars)
-        chunks.extend(section_chunks)
-
-    # Step 5: Filter out micro-chunks (header-only or near-empty)
-    chunks = [c for c in chunks if len(c.strip()) >= min_chars]
-
-    return chunks
+    for heading, body in _sections(text):
+        chunks.extend(_pack(heading, _units(body, max_chars - len(heading) - 2), max_chars))
+    chunks = _merge_small(chunks, max_chars)
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── Sections ──────────────────────────────────────────────────────────────────
 
-def _is_section_boundary(line: str) -> bool:
-    """
-    Return True if `line` starts a new logical section.
-
-    Recognises:
-      - Markdown headings:   # Title, ## Title
-      - Parser label markers: [Page 1], [Sheet: X], [Document: ...]
-      - ALL-CAPS section headers: EDUCATION, WORK EXPERIENCE
-    """
-    stripped = line.strip()
-    if not stripped:
-        return False
-
-    boundary_text = _BOUNDARY_PREFIX.sub("", stripped).strip()
-
-    if _HEADING.match(boundary_text):
-        return True
-    if _LABEL_MARKER.match(boundary_text):
-        return True
-    if _ALLCAPS_HEADER.match(boundary_text) and len(boundary_text) >= 5:
-        return True
-    if _looks_like_ppt_title(boundary_text):
-        return True
-    return False
+def _is_boundary(line: str) -> bool:
+    return bool(
+        _HEADING.match(line)
+        or _LABEL_MARKER.match(line)
+        or (_ALLCAPS_TITLE.match(line) and len(line.split()) >= 2)
+    )
 
 
-def _section_header_text(line: str) -> str:
-    """Normalize section boundary text before storing it as the chunk header."""
-    stripped = line.strip()
-    boundary_text = _BOUNDARY_PREFIX.sub("", stripped).strip()
-    return boundary_text or stripped
-
-
-def _looks_like_ppt_title(line: str) -> bool:
-    """Detect short standalone slide titles missed by Docling markdown."""
-    if not line or len(line) > 60:
-        return False
-    if any(ch in line for ch in "@/:\\"):
-        return False
-    if re.search(r"\d", line):
-        return False
-    if line.endswith((".", ",", ";", ":")):
-        return False
-
-    words = re.findall(r"[A-Za-z][A-Za-z\-]*", line)
-    if not 1 <= len(words) <= 5:
-        return False
-
-    capitalized = sum(1 for word in words if word[0].isupper())
-    return capitalized / len(words) >= 0.5
-
-
-def _split_into_sections(text: str) -> list[tuple[str, str]]:
-    """
-    Split text into (header, body) tuples on section boundaries.
-
-    Returns a list of (section_header, section_body) pairs.
-    The header is the boundary line itself; body is everything until the next
-    boundary. If the text has no headings, the entire text is one section.
-
-    Args:
-        text: Full cleaned text.
-
-    Returns:
-        List of (header, body) string tuples.
-    """
-    lines = text.split("\n")
-    sections: list[tuple[str, str]] = []
-
-    current_header = ""
-    current_body_lines: list[str] = []
-
-    for line in lines:
-        if _is_section_boundary(line):
-            # Flush accumulated body as a section
-            if current_body_lines or current_header:
-                body = "\n".join(current_body_lines).strip()
-                sections.append((current_header, body))
-            # Start a new section
-            current_header = _section_header_text(line)
-            current_body_lines = []
+def _sections(text: str) -> list[tuple[str, list[str]]]:
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if _is_boundary(stripped):
+            sections.append((stripped, []))
         else:
-            current_body_lines.append(line)
-
-    # Flush the final section
-    if current_body_lines or current_header:
-        body = "\n".join(current_body_lines).strip()
-        sections.append((current_header, body))
-
-    # Edge case: no sections found — treat entire text as one section
-    if not sections:
-        sections = [("", text.strip())]
-
-    return sections
+            sections[-1][1].append(stripped)
+    return [(heading, body) for heading, body in sections if heading or any(body)]
 
 
-def _chunk_section(
-    header: str,
-    body: str,
-    max_chars: int,
-) -> list[str]:
-    """
-    Chunk a single section (header + body) into max_chars-sized pieces.
+# ── Units (indivisible pieces of a section) ───────────────────────────────────
 
-    Strategy:
-      - Split body on paragraph boundaries (blank lines)
-      - Accumulate paragraphs into a chunk until max_chars is exceeded
-      - Prepend the section header to the first chunk of each section
-      - If a single paragraph exceeds max_chars, split it on sentences
+def _units(lines: list[str], limit: int) -> list[str]:
+    units: list[str] = []
+    paragraph: list[str] = []
+    i = 0
 
-    Args:
-        header:    Section heading line (may be empty string).
-        body:      Section body text.
-        max_chars: Maximum characters per chunk.
+    def flush_paragraph() -> None:
+        if paragraph:
+            units.extend(_split_prose(" ".join(paragraph) if _is_prose(paragraph) else "\n".join(paragraph), limit))
+            paragraph.clear()
 
-    Returns:
-        List of chunk strings for this section.
-    """
-    if not body and not header:
-        return []
-
-    # If body is empty but header exists (e.g. standalone heading), keep it
-    if not body:
-        return [header] if header else []
-
-    # Split on paragraph boundaries (one or more blank lines)
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", body) if p.strip()]
-
-    if not paragraphs:
-        return [header] if header else []
-
-    chunks: list[str] = []
-    current_parts: list[str] = []
-    current_len: int = 0
-    is_first_chunk = True
-
-    def _flush() -> None:
-        nonlocal current_parts, current_len, is_first_chunk
-        if not current_parts:
-            return
-        chunk_body = "\n\n".join(current_parts)
-        if is_first_chunk and header:
-            chunk_text_val = f"{header}\n\n{chunk_body}"
-            is_first_chunk = False
-        else:
-            chunk_text_val = chunk_body
-        chunks.append(chunk_text_val.strip())
-        current_parts = []
-        current_len = 0
-
-    for para in paragraphs:
-        para_len = len(para)
-
-        if para_len > max_chars:
-            # Paragraph is too large — split it on sentence boundaries
-            _flush()
-            sentence_chunks = _split_paragraph_by_sentences(
-                para, max_chars, header if is_first_chunk else ""
-            )
-            if sentence_chunks and is_first_chunk:
-                is_first_chunk = False
-            chunks.extend(sentence_chunks)
+    while i < len(lines):
+        line = lines[i]
+        if _RECORD_LINE.match(line):
+            flush_paragraph()
+            units.extend(_split_long(line, limit, " | "))
+        elif _EMAIL_LINE.match(line):
+            flush_paragraph()
+            j = i + 1
+            while j < len(lines) and not (_EMAIL_LINE.match(lines[j]) or _RECORD_LINE.match(lines[j])):
+                j += 1
+            units.extend(_email_units(line, lines[i + 1:j], limit))
+            i = j
             continue
+        elif _TABLE_LINE.match(line):
+            flush_paragraph()
+            j = i
+            while j < len(lines) and _TABLE_LINE.match(lines[j]):
+                j += 1
+            units.extend(_table_units(lines[i:j], limit))
+            i = j
+            continue
+        elif not line:
+            flush_paragraph()
+        else:
+            paragraph.append(line)
+        i += 1
+    flush_paragraph()
+    return units
 
-        # Will adding this paragraph exceed the limit?
-        projected = current_len + para_len + (2 if current_parts else 0)
 
-        if projected > max_chars and current_parts:
-            # Flush current chunk, then start fresh with this paragraph
-            _flush()
+def _is_prose(lines: list[str]) -> bool:
+    """Short label lines ("From: …") stay on their own lines; prose is re-flowed."""
+    return not all(re.match(r"^[A-Za-z][\w ./()-]{0,40}:\s", line) for line in lines)
 
-        current_parts.append(para)
-        current_len += para_len + (2 if len(current_parts) > 1 else 0)
 
-    # Flush any remaining content
-    _flush()
+def _email_units(header: str, body: list[str], limit: int) -> list[str]:
+    text = "\n".join(line for line in body if line).strip()
+    if len(header) + len(text) + 1 <= limit:
+        return [f"{header}\n{text}".strip()]
+    pieces = _split_prose(" ".join(text.split()), limit - len(header) - 1)
+    return [f"{header}\n{piece}" for piece in pieces]
 
+
+def _table_units(rows: list[str], limit: int) -> list[str]:
+    has_header = len(rows) > 1 and _TABLE_SEPARATOR.match(rows[1])
+    header = rows[:2] if has_header else []
+    body = rows[2:] if has_header else rows
+    header_text = "\n".join(header)
+    units: list[str] = []
+    current: list[str] = []
+    for row in body:
+        candidate = "\n".join([header_text, *current, row]).strip()
+        if current and len(candidate) > limit:
+            units.append("\n".join([header_text, *current]).strip())
+            current = []
+        current.extend(_split_long(row, limit - len(header_text) - 1, " | "))
+    if current or header:
+        units.append("\n".join([header_text, *current]).strip())
+    return units
+
+
+def _split_prose(text: str, limit: int) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    for sentence in _SENTENCE_END.split(text):
+        for part in _split_long(sentence, limit, "\n"):
+            if pieces and len(pieces[-1]) + len(part) + 1 <= limit:
+                pieces[-1] = f"{pieces[-1]} {part}"
+            else:
+                pieces.append(part)
+    return pieces
+
+
+def _split_long(text: str, limit: int, separator: str) -> list[str]:
+    """Split on `separator`, then hard-wrap anything still longer than `limit`."""
+    limit = max(limit, 200)
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    for part in text.split(separator):
+        while len(part) > limit:
+            cut = part.rfind(" ", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            pieces.append(part[:cut].strip())
+            part = part[cut:].strip()
+        if pieces and len(pieces[-1]) + len(separator) + len(part) <= limit:
+            pieces[-1] = f"{pieces[-1]}{separator}{part}"
+        elif part:
+            pieces.append(part)
+    return pieces
+
+
+# ── Packing ───────────────────────────────────────────────────────────────────
+
+def _pack(heading: str, units: list[str], max_chars: int) -> list[str]:
+    if not units:
+        return [heading] if heading else []
+    chunks: list[str] = []
+    current: list[str] = []
+    for unit in units:
+        candidate = _join(heading, [*current, unit])
+        if current and len(candidate) > max_chars:
+            chunks.append(_join(heading, current))
+            current = []
+        current.append(unit)
+    chunks.append(_join(heading, current))
     return chunks
 
 
-def _split_paragraph_by_sentences(
-    para: str,
-    max_chars: int,
-    header: str = "",
-) -> list[str]:
-    """
-    Split a single oversized paragraph into sentence-boundary chunks.
+def _join(heading: str, units: list[str]) -> str:
+    body = "\n".join(units)
+    return f"{heading}\n{body}".strip() if heading else body.strip()
 
-    Adds OVERLAP_SENTENCES sentences from the end of each chunk to the
-    start of the next, so boundary context is not lost.
 
-    Args:
-        para:      The paragraph text to split.
-        max_chars: Maximum characters per chunk.
-        header:    Section header to prepend to the first chunk.
-
-    Returns:
-        List of sentence-level chunk strings.
-    """
-    # Split on sentence-ending punctuation
-    sentences = [s.strip() for s in _SENTENCE_END.split(para) if s.strip()]
-
-    if not sentences:
-        return [para] if para.strip() else []
-
-    chunks: list[str] = []
-    current_sentences: list[str] = []
-    current_len = 0
-    is_first = True
-
-    for sentence in sentences:
-        sent_len = len(sentence)
-
-        if current_len + sent_len > max_chars and current_sentences:
-            # Flush current chunk
-            chunk_body = " ".join(current_sentences)
-            if is_first and header:
-                chunks.append(f"{header}\n\n{chunk_body}".strip())
-                is_first = False
-            else:
-                chunks.append(chunk_body.strip())
-
-            # Overlap: carry last OVERLAP_SENTENCES into next chunk
-            overlap = current_sentences[-OVERLAP_SENTENCES:]
-            current_sentences = overlap
-            current_len = sum(len(s) for s in current_sentences)
-
-        current_sentences.append(sentence)
-        current_len += sent_len + 1  # +1 for space
-
-    # Flush remainder
-    if current_sentences:
-        chunk_body = " ".join(current_sentences)
-        if is_first and header:
-            chunks.append(f"{header}\n\n{chunk_body}".strip())
+def _merge_small(chunks: list[str], max_chars: int) -> list[str]:
+    merged: list[str] = []
+    for chunk in chunks:
+        if merged and (len(merged[-1]) < SMALL_CHUNK_CHARS or len(chunk) < SMALL_CHUNK_CHARS) \
+                and len(merged[-1]) + len(chunk) + 2 <= max_chars:
+            merged[-1] = f"{merged[-1]}\n\n{chunk}"
         else:
-            chunks.append(chunk_body.strip())
-
-    return [c for c in chunks if c.strip()]
-
-
-# ── Legacy fallback (kept for compatibility, not used in main pipeline) ───────
-
-def chunk_text_by_sentence(
-    text: str,
-    max_chunk_size: int = 512,
-    overlap_sentences: int = 1,
-) -> list[str]:
-    """
-    Legacy sentence-boundary chunker.
-    Kept for backward compatibility — use chunk_text() for new code.
-
-    Args:
-        text:             The full cleaned text.
-        max_chunk_size:   Maximum characters per chunk.
-        overlap_sentences: Sentences to carry between chunks.
-
-    Returns:
-        List of non-empty text chunks.
-    """
-    if not text or not text.strip():
-        return []
-
-    sentences = [s.strip() for s in _SENTENCE_END.split(text.strip()) if s.strip()]
-    if not sentences:
-        return []
-
-    chunks: list[str] = []
-    current_sentences: list[str] = []
-    current_len = 0
-
-    for sentence in sentences:
-        if current_len + len(sentence) > max_chunk_size and current_sentences:
-            chunks.append(" ".join(current_sentences))
-            current_sentences = current_sentences[-overlap_sentences:]
-            current_len = sum(len(s) for s in current_sentences)
-
-        current_sentences.append(sentence)
-        current_len += len(sentence)
-
-    if current_sentences:
-        chunks.append(" ".join(current_sentences))
-
-    return [c for c in chunks if c.strip()]
+            merged.append(chunk)
+    return merged

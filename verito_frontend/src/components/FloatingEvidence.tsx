@@ -40,7 +40,11 @@ export function FloatingEvidence() {
       ))}
 
       {/* Connecting thread SVG */}
-      <svg className="absolute inset-0 h-full w-full" preserveAspectRatio="none" viewBox="0 0 100 100">
+      <svg
+        className="absolute inset-0 h-full w-full"
+        preserveAspectRatio="none"
+        viewBox="0 0 100 100"
+      >
         <defs>
           <linearGradient id="thread" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stopColor="oklch(0.66 0.24 22)" stopOpacity="0" />

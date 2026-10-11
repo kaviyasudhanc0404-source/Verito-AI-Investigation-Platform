@@ -4,7 +4,6 @@ schemas/chat.py
 Request and response schemas for the RAG chat endpoint.
 """
 
-from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel
 
@@ -19,3 +18,7 @@ class ChatMessageResponse(BaseModel):
     role: Literal["user", "verito"]
     text: str
     refs: list[str] = []
+
+    @classmethod
+    def from_doc(cls, doc: dict) -> "ChatMessageResponse":
+        return cls(id=doc["_id"], role=doc["role"], text=doc["text"], refs=doc.get("refs", []))

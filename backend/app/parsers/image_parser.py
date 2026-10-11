@@ -21,7 +21,6 @@ Pipeline:
         <AI scene description>
 """
 
-from pathlib import Path
 
 
 def parse(file_bytes: bytes, filename: str = "image.jpg") -> str:

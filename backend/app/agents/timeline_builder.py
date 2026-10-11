@@ -1,1010 +1,349 @@
 """
 agents/timeline_builder.py
----------------------------
-Agent 03 - Timeline Builder
+----------------------------
+Agent 03 — Timeline Builder.
 
-Builds a chronological event timeline from structured analyzer output and
-compact evidence snippets. The LLM is used for synthesis, while Python handles
-temporal extraction, provenance, ambiguity checks, validation, and sorting.
+Builds one chronological, plain-language timeline:
+  • every dated structured record becomes an event — well-known record types get a
+    tailored sentence ("Purchase order PO-1 raised for …"), any other record is
+    described from its fields' roles ("j.doe: signed in — vpn-gw-01 (FAILURE) from 203.0.113.7")
+  • the same document seen in several files becomes one event citing all of them
+  • dated sentences in narrative documents become events, summarised by the LLM
+    (or kept verbatim if the LLM is unavailable)
+  • reference-data dates far outside the period of activity (e.g. a registration
+    years earlier) are left out, and the number left out is reported
+
+Every event keeps its date type (created / approved / settled / event …), the
+original timestamp text, its timezone (or "not stated") and whether the date is
+approximate. Ordering normalises to UTC when zones are stated; dates and times
+always come from the same record or sentence — never borrowed from elsewhere.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import timedelta
 
-from app.database import collections
-from app.services.llm_service import (
-    ContextTooLargeError,
-    chat_completion_json,
-    emit_llm_failure_telemetry,
-)
-from app.utils.context_budget import (
-    estimate_tokens,
-    fit_items_by_tokens,
-    get_token_budget,
-    validate_payload,
-)
-from app.utils.datetime_utils import utcnow
+from pydantic import BaseModel
 
-Emitter = Callable[[str, dict], Awaitable[None]]
+from app.agents.base import AgentResult, AgentRun, PipelineContext
+from app.services.case_model import ROLES, Case
+from app.services.llm_service import chat_completion_json, failure_reason
+from app.services.records import Record, compact, field_role, kind_name
+from app.services.validation import ACCUSATORY
+from app.services.values import Timestamp, find_dates, find_ids, id_type, parse_amount, parse_timestamp, prose_sentences
 
-_SYSTEM_PROMPT = """You are a forensic timeline analyst.
-Build a chronological timeline using ONLY the provided timeline candidates.
+_SYSTEM_PROMPT = """You turn dated sentences from evidence documents into timeline entries.
 
-Rules:
-- Do not invent dates, times, events, people, places, or evidence references.
-- Do not resolve ambiguous dates. Keep them as ambiguous/UNCONFIRMED.
-- Merge duplicate candidates only when they clearly describe the same event.
-- Prefer direct evidence-backed facts over inference.
-- Every event must include at least one evidence reference from the candidates.
-- Return ONLY valid JSON in the requested schema.
+For each candidate return {"id": "<id>", "keep": true|false, "event": "<what happened on that date, max 25 words>"}.
+Set keep=false for date ranges, future deadlines, or dates that only label the document itself.
+Use only facts in the sentence. Never state guilt or intent. Return JSON: {"events": [...]}"""
 
-Return JSON:
-{
-  "events": [
-    {
-      "time": "readable date/time string",
-      "sort_time": "ISO 8601 timestamp or null",
-      "event": "brief evidence-grounded event description",
-      "refs": ["E-001"],
-      "classification": "FACT" | "INFERRED" | "UNCONFIRMED",
-      "confidence": "high" | "medium" | "low"
-    }
-  ],
-  "time_window": "readable range or 'Unknown'"
-}"""
-
-_VALID_CLASSIFICATIONS = {"FACT", "INFERRED", "UNCONFIRMED"}
-_VALID_CONFIDENCE = {"high", "medium", "low"}
-_DATE_TYPES = {"EVENT", "DOCUMENT", "REFERENCE", "METADATA", "AMBIGUOUS"}
-# No hard candidate cap — batched synthesis handles any count
-_MAX_TEXT_SNIPPET_CHARS = 280
-_SYNTHESIS_OUTPUT_RESERVE = 2000
-_ENVELOPE_TOKENS = 60
-
-_ISO_DATE_RE = re.compile(
-    r"\b(?P<year>20\d{2}|19\d{2})-(?P<month>0?[1-9]|1[0-2])-(?P<day>0?[1-9]|[12]\d|3[01])\b"
-)
-_SLASH_DATE_RE = re.compile(
-    r"\b(?P<a>0?[1-9]|[12]\d|3[01])/(?P<b>0?[1-9]|1[0-2])/(?P<year>20\d{2}|19\d{2})\b"
-)
-_MONTH_DATE_RE = re.compile(
-    r"\b(?:(?P<day>0?[1-9]|[12]\d|3[01])\s+(?P<month_name>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)|(?P<month_name_first>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?P<day_after>0?[1-9]|[12]\d|3[01]),?)\s+(?P<year>20\d{2}|19\d{2})\b",
-    re.IGNORECASE,
-)
-_TIME_RE = re.compile(
-    r"\b(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?::(?P<second>[0-5]\d))?\s*(?P<ampm>AM|PM|am|pm)?(?P<tz>Z|[+-]\d{2}:?\d{2})?\b"
-)
-
-_MONTHS = {
-    "jan": 1,
-    "january": 1,
-    "feb": 2,
-    "february": 2,
-    "mar": 3,
-    "march": 3,
-    "apr": 4,
-    "april": 4,
-    "may": 5,
-    "jun": 6,
-    "june": 6,
-    "jul": 7,
-    "july": 7,
-    "aug": 8,
-    "august": 8,
-    "sep": 9,
-    "sept": 9,
-    "september": 9,
-    "oct": 10,
-    "october": 10,
-    "nov": 11,
-    "november": 11,
-    "dec": 12,
-    "december": 12,
+_LLM_BATCH = 30
+CATEGORY_WEIGHT = {
+    "Payment": 3, "Purchase order": 3, "Vendor": 3, "Approval": 3, "Invoice": 2, "Access": 2,
+    "System activity": 2, "Call": 2, "Record": 1, "Chat": 1, "Email": 1, "Statement": 1, "Document": 1,
 }
+_CONTEXT_CATEGORIES = {"Vendor", "Statement"}      # reference data: frames the period, does not define it
+_SIGN_IN = re.compile(r"^(?:log\s?-?in|logon|sign\s?-?in)$", re.IGNORECASE)
+_SIGN_OUT = re.compile(r"^(?:log\s?-?out|logoff|sign\s?-?out)$", re.IGNORECASE)
+_ROUTINE_OUTCOME = re.compile(r"^(?:success(?:ful)?|completed|ok|done)$", re.IGNORECASE)
+_FAILED_OUTCOME = re.compile(r"fail|denied|invalid|reject|locked", re.IGNORECASE)
+_IRREGULAR = {"send": "sent", "read": "read", "write": "wrote", "run": "ran", "set": "set", "get": "got", "pay": "paid"}
 
 
-async def run(investigation_id: str, emit: Emitter, analyzer_output: dict) -> dict:
-    """Run the Timeline Builder agent."""
-    agent_id = "timeline"
-    await _set_status(investigation_id, agent_id, "running")
-    lines: list[dict] = []
+class _Decision(BaseModel):
+    id: str
+    keep: bool = True
+    event: str = ""
 
-    async def add_line(kind: str, text: str) -> None:
-        line = {"kind": kind, "text": text}
-        lines.append(line)
-        await _append_line(investigation_id, agent_id, line)
-        await emit("agent_activity", {"agent_id": agent_id, "line": line})
 
-    await add_line("info", "Constructing structured timeline candidates...")
+class _Reply(BaseModel):
+    events: list[_Decision] = []
 
-    evidence_docs = await collections.evidence().find(
-        {"investigation_id": investigation_id}
-    ).to_list(length=None)
-    evidence_ids = {str(ev.get("evidence_id", "")) for ev in evidence_docs}
 
-    candidates = _build_timeline_candidates(evidence_docs, analyzer_output)
-    ambiguous_count = sum(1 for item in candidates if item.get("ambiguous"))
+@dataclass
+class Event:
+    stamp: Timestamp
+    text: str
+    category: str
+    refs: set[str] = field(default_factory=set)
+    key: tuple = ()
+    date_type: str = "event"
+    records: list[str] = field(default_factory=list)
 
-    await add_line(
-        "scan",
-        f"Extracted {len(candidates)} temporal candidate(s) with provenance.",
-    )
-    if ambiguous_count:
-        await add_line(
-            "warn",
-            f"Flagged {ambiguous_count} ambiguous date candidate(s) without guessing.",
-        )
+    def to_dict(self, offset: timedelta | None) -> dict:
+        return {
+            "when": self.stamp.sort_key(offset).isoformat(),
+            "date": self.stamp.day_label,
+            "time": self.stamp.local.strftime("%H:%M") if self.stamp.has_time else "",
+            "zone": self.stamp.zone if self.stamp.has_time else "",
+            "approximate": self.stamp.approximate,
+            "original": self.stamp.raw,
+            "date_type": self.date_type,
+            "event": self.text,
+            "category": self.category,
+            "refs": sorted(self.refs),
+            "records": self.records[:4],
+        }
 
-    if not candidates:
-        output = _empty_output()
-        await add_line("warn", "No temporal anchors found in the evidence.")
-        await _complete(investigation_id, agent_id, lines, ["No timeline events"], output, status="completed_with_warnings")
-        await emit("agent_completed_with_warnings", {"agent_id": agent_id})
-        return output
 
-    await add_line("scan", "Synthesising timeline from candidates (batch synthesis)...")
+async def run(ctx: PipelineContext, agent: AgentRun) -> AgentResult:
+    case: Case = ctx.case
+    record_events = _merge([event for record in case.records for event in _record_events(case, record)])
+    await agent.log("ok", f"{len(record_events)} event(s) built from structured records.")
 
-    # Batch synthesis: split candidates into token-safe batches, merge results.
-    # Never discards candidates merely because there are many — batching handles them.
-    budget = get_token_budget(output_reserve=_SYNTHESIS_OUTPUT_RESERVE)
-    compact_all = _compact_candidates_for_llm(candidates)
-    batches = _split_candidate_batches(compact_all, budget=budget)
-    await add_line("info", f"Timeline synthesis: {len(compact_all)} compact candidates → {len(batches)} batch(es).")
+    candidates = _prose_candidates(case, record_events)
+    prose_events = await _summarise(candidates, agent) if candidates else []
+    await agent.log("ok", f"{len(prose_events)} event(s) taken from narrative documents.")
 
-    all_events: list[dict] = []
-    synthesis_failed = False
-    for batch_num, batch in enumerate(batches, start=1):
-        try:
-            user_content = (
-                "Timeline candidates with provenance:\n"
-                f"{json.dumps(batch, separators=(',', ':'))}"
-            )
-            messages = [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ]
-            max_out = _SYNTHESIS_OUTPUT_RESERVE
-            validation = validate_payload(messages, max_output_tokens=max_out, budget=budget)
-            if not validation.fits:
-                # Split batch further if still too large
-                sub_batches = _split_candidate_batches(batch, budget=budget)
-                for sub in sub_batches:
-                    sub_content = (
-                        "Timeline candidates with provenance:\n"
-                        f"{json.dumps(sub, separators=(',', ':'))}"
-                    )
-                    sub_msgs = [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": sub_content},
-                    ]
-                    sub_result = await chat_completion_json(sub_msgs, temperature=0.1, max_tokens=max_out)
-                    all_events.extend(sub_result.get("events", []) if isinstance(sub_result, dict) else [])
+    kept, left_out = _within_window(case, record_events, prose_events)
+    events = sorted(kept, key=lambda e: (e.stamp.sort_key(case.offset), e.text))
+    if left_out:
+        await agent.log("info", f"{left_out} reference date(s) far outside the period of activity were left out.")
+    unzoned = sum(e.stamp.has_time and e.stamp.offset is None for e in events)
+    zoned = sum(e.stamp.offset is not None for e in events)
+    if unzoned and zoned:
+        await agent.log("warn", f"{unzoned} timed event(s) state no timezone; they are assumed to use the case's main "
+                                "timezone when ordered.")
+    counts = {"events": len(events), "record_events": len(record_events), "document_events": len(prose_events),
+              "left_out": left_out, "approximate": sum(e.stamp.approximate for e in events), "unzoned": unzoned}
+    if not events:
+        await agent.log("warn", "No dated events were found in the evidence.")
+        return AgentResult({"events": [], "window": "", "counts": counts}, ["No dated events"], agent.status, counts=counts)
+
+    exact = [e for e in events if not e.stamp.approximate] or events       # "March 2026" does not set the period
+    window = f"{exact[0].stamp.local:%d %b %Y} – {exact[-1].stamp.local:%d %b %Y}"
+    await agent.log("ok", f"Timeline complete: {len(events)} events, {window}.")
+    output = {"events": [e.to_dict(case.offset) for e in events], "window": window, "counts": counts}
+    return AgentResult(output, [f"{len(events)} events sequenced", f"Window: {window}"], agent.status, counts=counts)
+
+
+# ── Record events ─────────────────────────────────────────────────────────────
+
+def _record_events(case: Case, r: Record) -> list[Event]:
+    """(date field, text, category, key) for one record → Events, using the record's own dates only."""
+    name, money = case.name, case.money
+    rid = r.primary_id
+    events: list[tuple[str, str, str, tuple]] = []      # ("" = the record's main date)
+
+    if r.kind == "purchase_order":
+        vendor, amount = name(_party(r)), parse_amount(r.value(*ROLES["amount"]))
+        detail = r.value("description")
+        people = f"Requested by {name(r.value('requestedby'))}; approved by {name(r.value('approvedby'))}." \
+            if r.value("requestedby") else ""
+        text = f"Purchase order {rid} raised for {vendor} — {money(amount)}" + (f" ({detail})" if detail else "") + f". {people}"
+        events.append(("", text.strip(), "Purchase order", ("po", rid)))
+        if r.value("approvaldate") and _day(r.value("approvaldate")) != _day(r.value("date", "podate")):
+            events.append(("approvaldate", f"{rid} approved by {name(r.value('approvedby'))}.", "Approval", ("po-ok", rid)))
+    elif r.kind == "invoice":
+        vendor, amount = name(_party(r)), parse_amount(r.value(*ROLES["amount"]))
+        po = r.value(*ROLES["po"])
+        events.append(("", f"{vendor} issued invoice {rid}" + (f" against {po}" if po else "") + f" — {money(amount)}.",
+                       "Invoice", ("inv", rid)))
+        paid_key = next((k for k in ("paiddate", "paidon") if r.value(k)), "")
+        if paid_key:
+            events.append((paid_key, f"Invoice {rid} recorded as paid.", "Payment", ("inv-paid", rid)))
+    elif r.kind == "payment":
+        amount, invoice = parse_amount(r.value(*ROLES["amount"])), r.value(*ROLES["invoice"])
+        events.append(("", f"Bank payment {rid} of {money(amount)} to {name(_party(r))}"
+                       + (f" for invoice {invoice}." if invoice else "."), "Payment", ("txn", rid)))
+    elif r.kind == "call":
+        duration = r.value("duration")
+        events.append(("", f"{name(r.role('actor'))} called {name(r.role('counterparty'))}"
+                       + (f" ({duration})." if duration else "."), "Call", ("call", rid or r.text())))
+    elif r.kind in {"message", "email"}:
+        sender, recipient = name(r.role("actor")), name(r.role("counterparty"))
+        if r.kind == "message":
+            text, category = f"Chat from {sender} to {recipient}: “{_clip(r.value('message'), 140)}”", "Chat"
+        else:
+            text, category = f"Email from {sender} to {recipient}: “{_clip(r.value('subject'), 120)}”", "Email"
+        events.append(("", text, category, (r.kind, r.evidence_id, r.index)))
+    elif r.kind == "vendor_event":
+        actor = r.value("updatedbyemployeeid")
+        events.append(("", f"{name(r.value('vendorid'))}: {r.value('eventtype').lower()}"
+                       + (f" (recorded by {name(actor)})." if actor else "."), "Vendor",
+                       ("vendor", r.value("vendorid"), _day(r.value("eventdate")))))
+    elif r.kind == "bank_detail":
+        updated, effective = r.value("lastupdated"), r.value("effectivedate")
+        if updated and _day(updated) != _day(effective):
+            events.append(("lastupdated", f"Bank details of {name(r.value('vendorid', 'vendorname'))} updated.", "Vendor",
+                           ("vendor", r.value("vendorid"), _day(updated))))
+    elif r.kind == "vendor":
+        for key, label in (("registrationdate", "registered"), ("empanelmentdate", "empanelment")):
+            if parse_timestamp(r.value(key)):
+                events.append((key, f"{r.value('vendorname')}: vendor {label}.", "Vendor",
+                               ("vendor", r.value("vendorid"), _day(r.value(key)))))
+    elif r.kind == "statement" and r.value("witness"):
+        events.append(("", f"Witness statement given by {name(r.value('witness'))}.",
+                       "Statement", ("ws", r.value("witness"), _day(r.value("statementdate")))))
+    elif r.kind == "audit_event":
+        events.append(("", _activity_text(case, r), _activity_category(r), ("act", rid or r.ref)))
+    elif r.kind == "generic":
+        events.append(("", _generic_text(r), "Record", ("rec", rid or r.ref)))
+
+    dates = {compact(key): (dtype, stamp) for key, dtype, stamp in r.dates()}
+    built = []
+    for date_key, text, category, key in events:
+        dtype, stamp = dates.get(date_key) or _main(r)
+        if stamp:
+            built.append(Event(stamp, text, category, {r.evidence_id}, key, dtype, [r.citation]))
+    return built
+
+
+def _main(r: Record) -> tuple[str, Timestamp | None]:
+    stamp = r.when
+    dtype = next((dtype for _, dtype, s in r.dates() if s == stamp), "event")
+    return dtype, stamp
+
+
+def _activity_text(case: Case, r: Record) -> str:
+    """'Arvind Kumaraswamy created PO-2026-0342 in Procurement Portal.' from any activity-log row."""
+    actor = case.name(r.role("actor")) or "Unknown user"
+    targets = sorted((v for k, v in r.fields.items() if field_role(compact(k)) == "target" and id_type(v) != "session"),
+                     key=lambda v: not find_ids(v))          # the record acted on first, then the system
+    target = targets[0] if targets else ""
+    outcome, ip = r.role("outcome"), r.role("ip")
+    sign_in = _SIGN_IN.match(_words(r.role("action")))
+    if sign_in and _FAILED_OUTCOME.search(outcome):
+        text, outcome = f"{actor} failed to sign in to {target}", ""
+    else:
+        text = f"{actor} {_past_tense(r.role('action'), target)}"
+    if len(targets) > 1:
+        text += f" in {targets[1]}"
+    if outcome and not _ROUTINE_OUTCOME.match(outcome):
+        text += f" ({outcome})"
+    if ip and sign_in:
+        text += f" from {ip}"
+    return f"{' '.join(text.split())}."
+
+
+def _activity_category(r: Record) -> str:
+    action = _words(r.role("action"))
+    return "Access" if _SIGN_IN.match(action) or _SIGN_OUT.match(action) else "System activity"
+
+
+def _past_tense(action: str, target: str) -> str:
+    """'CREATE_PO' + 'PO-1' → 'created PO-1'; 'RELEASE_PAYMENT' + 'INV-1' → 'released payment for INV-1'."""
+    words = _words(action).split()
+    if not words:
+        return f"acted on {target}".strip()
+    if _SIGN_IN.match(" ".join(words)):
+        return f"signed in to {target}".strip() if target else "signed in"
+    if _SIGN_OUT.match(" ".join(words)):
+        return f"signed out of {target}".strip() if target else "signed out"
+    verb, rest = words[0], [w.upper() if len(w) <= 3 else w for w in words[1:]]
+    past = _IRREGULAR.get(verb) or (verb + "d" if verb.endswith("e") else verb[:-1] + "ied"
+                                    if re.search(r"[^aeiou]y$", verb) else verb + "ed")
+    noun = " ".join(rest)
+    if noun and target and target.upper().startswith(noun.upper().replace(" ", "")):
+        noun = ""                                       # 'created PO PO-1' → 'created PO-1'
+    joiner = " for " if noun and target and id_type(target) != noun.lower() else " "
+    return " ".join(f"{past} {noun}{joiner if target else ''}{target}".split())
+
+
+def _generic_text(r: Record) -> str:
+    """'INC-2026-0042 (Incidents, row 3): Severity: High; Status: Open.' from any other dated record."""
+    shown = [(k, v) for k, v in r.fields.items() if v != r.primary_id and not parse_timestamp(v)][:3]
+    label = r.primary_id or f"{kind_name(r.kind).capitalize()} in {r.location}"
+    return f"{label}: " + "; ".join(f"{k}: {_clip(v, 60)}" for k, v in shown) + "."
+
+
+def _merge(events: list[Event]) -> list[Event]:
+    """Collapse the same event seen in several files into one with all citations."""
+    merged: dict[tuple, Event] = {}
+    for event in events:
+        key = (event.key, event.stamp.local.date())
+        if key in merged:
+            existing = merged[key]
+            existing.refs |= event.refs
+            existing.records += event.records
+            if event.stamp.has_time and not existing.stamp.has_time:
+                existing.stamp = event.stamp
+        else:
+            merged[key] = event
+    return list(merged.values())
+
+
+# ── Narrative events ──────────────────────────────────────────────────────────
+
+def _prose_candidates(case: Case, record_events: list[Event]) -> list[dict]:
+    known = {(e.stamp.local.date(), ref) for e in record_events for ref in find_ids(e.text)}
+    candidates, seen = [], set()
+    for item in case.evidence:
+        for sentence in prose_sentences(item.text):
+            dates = find_dates(sentence)
+            if not dates or len(sentence) < 25:
                 continue
-
-            result = await chat_completion_json(messages, temperature=0.1, max_tokens=max_out)
-            all_events.extend(result.get("events", []) if isinstance(result, dict) else [])
-
-        except (ContextTooLargeError, Exception) as exc:
-            is_413 = isinstance(exc, ContextTooLargeError)
-            code = 413 if is_413 else (400 if "400" in str(exc) or "json" in str(exc).lower() else "unknown")
-            category = "context_too_large" if is_413 else ("json_validation" if code == 400 else "unknown")
-            estimated_input = estimate_tokens(json.dumps(batch, separators=(',', ':')))
-            emit_llm_failure_telemetry(
-                agent_name="timeline_builder",
-                error_code=code,
-                error_category=category,
-                estimated_input_tokens=estimated_input,
-                requested_output_tokens=_SYNTHESIS_OUTPUT_RESERVE,
-                payload_size_chars=len(json.dumps(batch, separators=(',', ':'))),
-                attempt_number=1,
-                batch_number=batch_num,
-                batch_total=len(batches),
-                evidence_ids=list({c.get("evidence_id", "") for c in batch}),
-                was_retried=False,
-                retry_action=None,
-                fallback_action="deterministic_event_extraction",
-                original_message=getattr(exc, 'original_message', str(exc)),
-            )
-            synthesis_failed = True
-            await add_line("warn", f"Timeline batch {batch_num} synthesis failed — using fallback.")
-            fallback = _fallback_timeline([c for c in candidates if c.get("evidence_id") in
-                                           {b.get("evidence_id") for b in batch}])
-            all_events.extend(fallback.get("events", []))
-
-    events = _validate_and_sort_events(
-        all_events,
-        candidates=candidates,
-        valid_evidence_ids=evidence_ids,
-    )
-    time_window = _compute_time_window(events)
-    output = _build_output(events, time_window, candidates)
-
-    await asyncio.sleep(0.2)
-
-    for event in events[:12]:
-        classification = event.get("classification", "FACT")
-        refs_str = ", ".join(event.get("refs", []))
-        await add_line(
-            "ok" if classification == "FACT" else "scan",
-            (
-                f"{event.get('time', '?')}: {event.get('event', '')} "
-                f"[{classification}]"
-                + (f" ({refs_str})" if refs_str else "")
-            ),
-        )
-
-    if len(events) > 12:
-        await add_line("info", f"{len(events) - 12} additional event(s) saved.")
-
-    await add_line("ok", f"{len(events)} timeline event(s) validated and sorted.")
-
-    summary = [
-        f"{len(events)} events sequenced",
-        f"Window: {time_window}" if time_window != "Unknown" else "Timeline window unknown",
-    ]
-
-    status = "completed_with_warnings" if synthesis_failed else "done"
-    await _complete(investigation_id, agent_id, lines, summary, output, status=status)
-    await emit(
-        "agent_completed_with_warnings" if status == "completed_with_warnings" else "agent_completed",
-        {"agent_id": agent_id},
-    )
-    return output
-
-
-def _empty_output() -> dict:
-    return {
-        "events": [],
-        "time_window": "Unknown",
-        "event_count": 0,
-        "candidate_count": 0,
-        "ambiguous_candidate_count": 0,
-        "fact_count": 0,
-        "inferred_count": 0,
-        "unconfirmed_count": 0,
-        "temporal_candidates": [],
-    }
-
-
-def _build_timeline_candidates(evidence_docs: list[dict], analyzer_output: dict) -> list[dict]:
-    entities_by_evidence = analyzer_output.get("entities_by_evidence", {})
-    candidates: list[dict] = []
-    seen: set[tuple] = set()
-
-    for ev in evidence_docs:
-        evidence_id = str(ev.get("evidence_id") or "")
-        if not evidence_id:
-            continue
-
-        filename = str(ev.get("filename") or "unknown")
-        content = _normalise_text(ev.get("content", ""))
-        bucket = entities_by_evidence.get(evidence_id, {})
-
-        analyzer_date_mentions = _mentions_from_analyzer(bucket.get("dates", []), "dates")
-        regex_date_mentions = _extract_date_mentions(content)
-        date_mentions = _merge_date_mentions(analyzer_date_mentions, regex_date_mentions)
-        time_mentions = _extract_time_mentions(content)
-        if not time_mentions:
-            time_mentions = _mentions_from_analyzer(bucket.get("times", []), "times")
-
-        date_mentions = _dedupe_mentions(date_mentions)
-        time_mentions = _dedupe_mentions(time_mentions)
-        statements = _clean_list(bucket.get("key_statements", []))[:3]
-        findings = _clean_list(bucket.get("key_findings", []))[:3]
-        snippet = _snippet(content)
-
-        for date_mention in date_mentions[:8]:
-            times = _matching_time_mentions(date_mention, time_mentions) or [None]
-            for time_mention in times:
-                candidate = _candidate_from_mentions(
-                    evidence_id=evidence_id,
-                    filename=filename,
-                    date_mention=date_mention,
-                    time_mention=time_mention,
-                    statements=statements,
-                    findings=findings,
-                    snippet=snippet,
-                )
-                identity = (
-                    candidate["evidence_id"],
-                    candidate["date_text"].casefold(),
-                    candidate.get("time_text", "").casefold(),
-                    candidate.get("sort_time"),
-                )
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                candidates.append(candidate)
-
+            first = dates[0]
+            ids = find_ids(sentence)
+            if ids and all((first.when.date(), ref) in known for ref in ids):
+                continue                       # already covered by a record event
+            signature = (first.when.date(), sentence[:80].casefold())
+            if signature in seen:
+                continue
+            seen.add(signature)
+            candidates.append({"id": f"N-{len(candidates) + 1:03d}", "stamp": first.timestamp,
+                               "text": _clip(sentence, 300), "evidence_id": item.evidence_id, "file": item.filename})
     return candidates
 
 
-def _mentions_from_analyzer(values: object, field: str) -> list[dict]:
-    mentions = []
-    for value in _clean_list(values):
-        mentions.append(
-            {
-                "text": value,
-                "source": "analyzer",
-                "field": field,
-                "excerpt": value,
-            }
-        )
-    return mentions
-
-
-def _merge_date_mentions(analyzer_mentions: list[dict], regex_mentions: list[dict]) -> list[dict]:
-    if not regex_mentions:
-        return analyzer_mentions
-    analyzer_by_text = {
-        _normalise_text(item.get("text")).casefold(): item
-        for item in analyzer_mentions
-    }
-    merged = []
-    for mention in regex_mentions:
-        key = _normalise_text(mention.get("text")).casefold()
-        analyzer_item = analyzer_by_text.get(key)
-        if analyzer_item:
-            merged.append({**mention, "source": "analyzer", "field": analyzer_item.get("field", "dates")})
-        else:
-            merged.append(mention)
-    return merged
-
-
-def _extract_date_mentions(text: str) -> list[dict]:
-    mentions: list[dict] = []
-    for pattern_name, pattern in (
-        ("iso_date", _ISO_DATE_RE),
-        ("slash_date", _SLASH_DATE_RE),
-        ("month_date", _MONTH_DATE_RE),
-    ):
-        for match in pattern.finditer(text):
-            mentions.append(
-                {
-                    "text": match.group(0),
-                    "source": "regex",
-                    "field": pattern_name,
-                    "excerpt": _excerpt_around(text, match.start(), match.end()),
-                }
+async def _summarise(candidates: list[dict], agent: AgentRun) -> list[Event]:
+    decisions: dict[str, dict] = {}
+    for start in range(0, len(candidates), _LLM_BATCH):
+        batch = candidates[start:start + _LLM_BATCH]
+        payload = [{"id": c["id"], "date": c["stamp"].display(), "file": c["file"], "text": c["text"]} for c in batch]
+        try:
+            reply = await chat_completion_json(
+                [{"role": "system", "content": _SYSTEM_PROMPT},
+                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+                max_tokens=60 * len(batch) + 200, purpose="timeline.summarise", schema=_Reply,
             )
-    return mentions
+            decisions.update({d["id"]: d for d in reply["events"]})
+        except Exception as exc:
+            await agent.fallback(f"AI summary of {len(batch)} document date(s) unavailable ({failure_reason(exc)}); "
+                                 "using the original sentences.", units=len(batch))
 
-
-def _extract_time_mentions(text: str) -> list[dict]:
-    mentions = []
-    for match in _TIME_RE.finditer(text):
-        mentions.append(
-            {
-                "text": match.group(0),
-                "source": "regex",
-                "field": "time",
-                "excerpt": _excerpt_around(text, match.start(), match.end()),
-            }
-        )
-    return mentions
-
-
-def _matching_time_mentions(date_mention: dict, time_mentions: list[dict]) -> list[dict]:
-    if not time_mentions:
-        return []
-
-    date_excerpt = _normalise_text(date_mention.get("excerpt"))
-    if not date_excerpt:
-        return []
-
-    matches = []
-    for time_mention in time_mentions:
-        time_excerpt = _normalise_text(time_mention.get("excerpt"))
-        time_text = _normalise_text(time_mention.get("text"))
-        if not time_text:
-            continue
-        if time_text in date_excerpt or (time_excerpt and _excerpts_overlap(date_excerpt, time_excerpt)):
-            matches.append(time_mention)
-    return matches[:2]
-
-
-def _excerpts_overlap(a: str, b: str) -> bool:
-    a_tokens = set(re.findall(r"[A-Za-z0-9-]{4,}", a.casefold()))
-    b_tokens = set(re.findall(r"[A-Za-z0-9-]{4,}", b.casefold()))
-    return len(a_tokens.intersection(b_tokens)) >= 3
-
-
-def _candidate_from_mentions(
-    *,
-    evidence_id: str,
-    filename: str,
-    date_mention: dict,
-    time_mention: dict | None,
-    statements: list[str],
-    findings: list[str],
-    snippet: str,
-) -> dict:
-    date_parse = _parse_date_token(str(date_mention.get("text", "")))
-    time_parse = _parse_time_token(str(time_mention.get("text", ""))) if time_mention else {}
-    sort_time = None
-    ambiguous = bool(date_parse.get("ambiguous"))
-    ambiguity_reason = date_parse.get("ambiguity_reason")
-
-    if not ambiguous and date_parse.get("date"):
-        sort_time = _combine_date_time(date_parse["date"], time_parse)
-
-    # Same-context invariant: date and time must come from the same record/sentence.
-    # _matching_time_mentions() already enforces this via excerpt overlap.
-    # We record same_context_verified = True only when a time is matched from the
-    # same excerpt as the date — never combined across different records.
-    same_context_verified = time_mention is not None
-
-    # Date-type classification: classify the role of this date in the evidence.
-    date_type = _classify_date_type(
-        date_mention=date_mention,
-        snippet=snippet,
-        statements=statements,
-    )
-
-    return {
-        "evidence_id": evidence_id,
-        "filename": filename,
-        "date_text": str(date_mention.get("text", "")),
-        "time_text": str(time_mention.get("text", "")) if time_mention else "",
-        "sort_time": sort_time,
-        "precision": "minute" if time_mention else "day",
-        "timezone": time_parse.get("timezone"),
-        "ambiguous": ambiguous,
-        "ambiguity_reason": ambiguity_reason,
-        "same_context_verified": same_context_verified,
-        "date_type": date_type,
-        "statements": statements,
-        "findings": findings,
-        "snippet": snippet,
-        "provenance": [
-            {
-                "source": date_mention.get("source"),
-                "field": date_mention.get("field"),
-                "value": date_mention.get("text"),
-                "excerpt": date_mention.get("excerpt"),
-            },
-            *(
-                [
-                    {
-                        "source": time_mention.get("source"),
-                        "field": time_mention.get("field"),
-                        "value": time_mention.get("text"),
-                        "excerpt": time_mention.get("excerpt"),
-                    }
-                ]
-                if time_mention
-                else []
-            ),
-        ],
-    }
-
-
-def _compact_candidates_for_llm(candidates: list[dict]) -> list[dict]:
-    """Convert candidates to compact LLM-friendly format. Does NOT truncate."""
-    compact = []
-    for index, candidate in enumerate(candidates, start=1):
-        compact.append(
-            {
-                "candidate_id": f"T-{index:03d}",
-                "evidence_id": candidate["evidence_id"],
-                "filename": candidate["filename"],
-                "date_text": candidate["date_text"],
-                "time_text": candidate["time_text"],
-                "sort_time": candidate["sort_time"],
-                "ambiguous": candidate["ambiguous"],
-                "ambiguity_reason": candidate.get("ambiguity_reason"),
-                "same_context_verified": candidate.get("same_context_verified", False),
-                "date_type": candidate.get("date_type", "AMBIGUOUS"),
-                "statements": candidate.get("statements", []),
-                "findings": candidate.get("findings", []),
-                "snippet": candidate.get("snippet", ""),
-            }
-        )
-    return compact  # Splitting is handled by _split_candidate_batches
-
-
-def _split_candidate_batches(
-    compact_candidates: list[dict],
-    *,
-    budget: object,
-) -> list[list[dict]]:
-    """Split compact candidates into token-safe batches for batch synthesis.
-
-    Handles any number of candidates — never discards because count is high.
-    """
-    system_tokens = estimate_tokens(_SYSTEM_PROMPT)
-    envelope_tokens = _ENVELOPE_TOKENS
-    available = budget.effective_input - system_tokens - envelope_tokens  # type: ignore[attr-defined]
-    available = max(available, 200)
-
-    batches: list[list[dict]] = []
-    current: list[dict] = []
-    current_tokens = 0
-
-    for item in compact_candidates:
-        item_tokens = estimate_tokens(json.dumps(item, separators=(',', ':')))
-        if current and current_tokens + item_tokens > available:
-            batches.append(current)
-            current, current_tokens = [], 0
-        current.append(item)
-        current_tokens += item_tokens
-
-    if current:
-        batches.append(current)
-    return batches or [[]]
-
-
-def _classify_date_type(
-    *,
-    date_mention: dict,
-    snippet: str,
-    statements: list[str],
-) -> str:
-    """Classify the temporal role of a date in the evidence.
-
-    Returns one of: EVENT | DOCUMENT | REFERENCE | METADATA | AMBIGUOUS
-
-    EVENT    — date describes something that happened (an action, transaction, meeting)
-    DOCUMENT — date is a document creation/submission/filing date
-    REFERENCE — date is cited as a past or future reference point
-    METADATA — date is file metadata (created_at, modified_at, accessed_at)
-    AMBIGUOUS — cannot determine from context signals
-    """
-    context = " ".join(filter(None, [snippet, *statements])).lower()
-    field = str(date_mention.get("field", "")).lower()
-    source = str(date_mention.get("source", "")).lower()
-
-    _METADATA_WORDS = ("created", "modified", "accessed", "uploaded", "metadata", "file date", "recorded")
-    _DOCUMENT_WORDS = ("dated", "signed", "issued", "filed", "submitted", "document date", "report date", "letter dated")
-    _REFERENCE_WORDS = ("as of", "prior to", "before", "after", "since", "by", "effective", "reference date")
-    _EVENT_WORDS = ("on", "occurred", "happened", "took place", "meeting", "transaction",
-                    "payment", "transfer", "received", "sent", "arrested", "purchased", "sold")
-
-    if any(w in context for w in _METADATA_WORDS):
-        return "METADATA"
-    if any(w in context for w in _DOCUMENT_WORDS):
-        return "DOCUMENT"
-    if any(w in context for w in _EVENT_WORDS):
-        return "EVENT"
-    if any(w in context for w in _REFERENCE_WORDS):
-        return "REFERENCE"
-    return "AMBIGUOUS"
-
-
-def _fallback_timeline(candidates: list[dict]) -> dict:
     events = []
-    for candidate in candidates:
-        text_parts = candidate.get("statements") or candidate.get("findings") or []
-        event_text = text_parts[0] if text_parts else _event_text_from_candidate(candidate)
-        classification = "UNCONFIRMED" if candidate.get("ambiguous") else "FACT"
-        confidence = "low" if candidate.get("ambiguous") else "medium"
-        events.append(
-            {
-                "time": _readable_time(candidate),
-                "sort_time": candidate.get("sort_time"),
-                "event": event_text,
-                "refs": [candidate["evidence_id"]],
-                "classification": classification,
-                "confidence": confidence,
-            }
-        )
-    return {"events": events, "time_window": "Unknown"}
-
-
-def _event_text_from_candidate(candidate: dict) -> str:
-    date_text = _normalise_text(candidate.get("date_text"))
-    time_text = _normalise_text(candidate.get("time_text"))
-    for item in candidate.get("provenance", []):
-        if not isinstance(item, dict):
+    for c in candidates:
+        decision = decisions.get(c["id"], {})
+        if decision.get("keep") is False:
             continue
-        excerpt = _normalise_text(item.get("excerpt"))
-        if excerpt and excerpt not in {date_text, time_text}:
-            return _trim_event_text(excerpt, date_text, time_text)
-    snippet = _normalise_text(candidate.get("snippet"))
-    if snippet:
-        return _trim_event_text(snippet, date_text, time_text)
-    return f"Date/time reference {date_text} {time_text}".strip()
+        summary = " ".join(str(decision.get("event") or "").split())
+        text = summary if summary and not ACCUSATORY.search(summary) else c["text"]
+        events.append(Event(c["stamp"], text, "Document", {c["evidence_id"]}, ("doc", c["id"]),
+                            records=[f"{c['evidence_id']} · {c['file']}"]))
+    return events
 
 
-def _trim_event_text(text: str, date_text: str, time_text: str) -> str:
-    clean = _normalise_text(text)
-    anchor = date_text or time_text
-    if anchor:
-        index = clean.casefold().find(anchor.casefold())
-        if index >= 0:
-            left = max(0, index - 90)
-            right = min(len(clean), index + len(anchor) + 110)
-            clean = clean[left:right].strip(" ,.;:-")
-    if len(clean) > 180:
-        clean = clean[:177].rstrip() + "..."
-    return clean or "Temporal evidence reference"
+def _within_window(case: Case, record_events: list[Event], prose_events: list[Event]) -> tuple[list[Event], int]:
+    """Keep events within 60 days before / 30 days after the period of activity. Returns (kept, left out)."""
+    everything = record_events + prose_events
+    core = [e.stamp.sort_key(case.offset) for e in record_events if e.category not in _CONTEXT_CATEGORIES]
+    if not core:
+        return everything, 0
+    start, end = min(core) - timedelta(days=60), max(core) + timedelta(days=30)
+    kept = [e for e in everything if start <= e.stamp.sort_key(case.offset) <= end]
+    return kept, len(everything) - len(kept)
 
 
-def _validate_and_sort_events(
-    events: object,
-    *,
-    candidates: list[dict],
-    valid_evidence_ids: set[str],
-) -> list[dict]:
-    if not isinstance(events, list):
-        return []
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    candidate_sort_times = {
-        (candidate["evidence_id"], candidate.get("sort_time"))
-        for candidate in candidates
-        if candidate.get("sort_time")
-    }
-    candidate_ambiguous_refs = {
-        candidate["evidence_id"] for candidate in candidates if candidate.get("ambiguous")
-    }
-    provenance_by_ref_time = _provenance_index(candidates)
+def _party(r: Record) -> str:
+    return r.value(*ROLES["vendor"]) or r.role("counterparty")
 
-    cleaned_events = []
-    seen: set[tuple] = set()
-    for event in events:
-        if not isinstance(event, dict):
-            continue
 
-        refs = [
-            ref
-            for ref in _clean_list(event.get("refs", []))
-            if ref in valid_evidence_ids
-        ]
-        if not refs:
-            continue
+def _words(action: str) -> str:
+    return " ".join(re.sub(r"[_\-]+", " ", action or "").lower().split())
 
-        sort_time = event.get("sort_time")
-        sort_time = str(sort_time).strip() if sort_time else None
-        if sort_time and not _is_valid_iso(sort_time):
-            sort_time = None
 
-        classification = str(event.get("classification") or "UNCONFIRMED").upper()
-        if classification not in _VALID_CLASSIFICATIONS:
-            classification = "UNCONFIRMED"
+def _day(value: str):
+    stamp = parse_timestamp(value)
+    return stamp.local.date() if stamp else None
 
-        if any(ref in candidate_ambiguous_refs for ref in refs) and not sort_time:
-            classification = "UNCONFIRMED"
 
-        confidence = str(event.get("confidence") or "medium").lower()
-        if confidence not in _VALID_CONFIDENCE:
-            confidence = "medium"
-
-        event_text = _normalise_text(event.get("event", ""))
-        if not event_text:
-            continue
-
-        time_text = _normalise_text(event.get("time", "")) or "Unknown"
-        if sort_time and not any((ref, sort_time) in candidate_sort_times for ref in refs):
-            sort_time = None
-            if classification == "FACT":
-                classification = "INFERRED"
-
-        if any(ref in candidate_ambiguous_refs for ref in refs) and not sort_time:
-            classification = "UNCONFIRMED"
-
-        identity = (tuple(sorted(refs)), sort_time, event_text.casefold())
-        if identity in seen:
-            continue
-        seen.add(identity)
-
-        cleaned_events.append(
-            {
-                "time": time_text,
-                "sort_time": sort_time,
-                "event": event_text,
-                "refs": refs,
-                "classification": classification,
-                "confidence": confidence,
-                "provenance": _event_provenance(
-                    refs=refs,
-                    sort_time=sort_time,
-                    index=provenance_by_ref_time,
-                ),
-            }
-        )
-
-    return sorted(cleaned_events, key=_event_sort_key)
-
-
-def _event_sort_key(event: dict) -> tuple[int, datetime, str]:
-    sort_time = event.get("sort_time")
-    parsed = _parse_iso_datetime(sort_time) if sort_time else None
-    if not parsed:
-        return (1, datetime.max.replace(tzinfo=timezone.utc), event.get("time", ""))
-    return (0, parsed, event.get("time", ""))
-
-
-def _compute_time_window(events: list[dict]) -> str:
-    known = [event for event in events if event.get("sort_time")]
-    if not known:
-        return "Unknown"
-    first = known[0]["time"]
-    last = known[-1]["time"]
-    return first if first == last else f"{first} - {last}"
-
-
-def _build_output(events: list[dict], time_window: str, candidates: list[dict]) -> dict:
-    return {
-        "events": events,
-        "time_window": time_window,
-        "event_count": len(events),
-        "candidate_count": len(candidates),
-        "ambiguous_candidate_count": sum(1 for item in candidates if item.get("ambiguous")),
-        "fact_count": sum(1 for e in events if e.get("classification") == "FACT"),
-        "inferred_count": sum(1 for e in events if e.get("classification") == "INFERRED"),
-        "unconfirmed_count": sum(1 for e in events if e.get("classification") == "UNCONFIRMED"),
-        "temporal_candidates": _compact_candidates_for_llm(candidates),
-    }
-
-
-def _provenance_index(candidates: list[dict]) -> dict[tuple[str, str | None], list[dict]]:
-    index: dict[tuple[str, str | None], list[dict]] = {}
-    for candidate in candidates:
-        key = (candidate["evidence_id"], candidate.get("sort_time"))
-        index.setdefault(key, []).append(
-            {
-                "evidence_id": candidate["evidence_id"],
-                "filename": candidate.get("filename", "unknown"),
-                "date_text": candidate.get("date_text", ""),
-                "time_text": candidate.get("time_text", ""),
-                "sort_time": candidate.get("sort_time"),
-                "ambiguous": candidate.get("ambiguous", False),
-                "ambiguity_reason": candidate.get("ambiguity_reason"),
-                "provenance": candidate.get("provenance", []),
-            }
-        )
-    return index
-
-
-def _event_provenance(
-    *,
-    refs: list[str],
-    sort_time: str | None,
-    index: dict[tuple[str, str | None], list[dict]],
-) -> list[dict]:
-    provenance = []
-    seen: set[tuple[str, str | None, str, str]] = set()
-    for ref in refs:
-        matches = index.get((ref, sort_time), [])
-        if not matches and sort_time is not None:
-            matches = index.get((ref, None), [])
-        for item in matches:
-            identity = (
-                item["evidence_id"],
-                item.get("sort_time"),
-                item.get("date_text", ""),
-                item.get("time_text", ""),
-            )
-            if identity in seen:
-                continue
-            seen.add(identity)
-            provenance.append(item)
-    return provenance
-
-
-def _parse_date_token(value: str) -> dict:
-    text = value.strip()
-    if not text:
-        return {"date": None, "ambiguous": True, "ambiguity_reason": "empty_date"}
-
-    match = _ISO_DATE_RE.search(text)
-    if match:
-        return _date_result(
-            int(match.group("year")),
-            int(match.group("month")),
-            int(match.group("day")),
-        )
-
-    match = _SLASH_DATE_RE.search(text)
-    if match:
-        a = int(match.group("a"))
-        b = int(match.group("b"))
-        year = int(match.group("year"))
-        if a <= 12 and b <= 12:
-            return {
-                "date": None,
-                "ambiguous": True,
-                "ambiguity_reason": "slash_date_could_be_dd_mm_or_mm_dd",
-            }
-        if a > 12:
-            return _date_result(year, b, a)
-        return _date_result(year, a, b)
-
-    match = _MONTH_DATE_RE.search(text)
-    if match:
-        month_text = match.group("month_name") or match.group("month_name_first")
-        day_text = match.group("day") or match.group("day_after")
-        return _date_result(
-            int(match.group("year")),
-            _MONTHS[month_text.casefold()],
-            int(day_text),
-        )
-
-    return {"date": None, "ambiguous": True, "ambiguity_reason": "unsupported_date_format"}
-
-
-def _date_result(year: int, month: int, day: int) -> dict:
-    try:
-        return {
-            "date": datetime(year, month, day),
-            "ambiguous": False,
-            "ambiguity_reason": None,
-        }
-    except ValueError:
-        return {"date": None, "ambiguous": True, "ambiguity_reason": "invalid_calendar_date"}
-
-
-def _parse_time_token(value: str) -> dict:
-    text = value.strip()
-    match = _TIME_RE.search(text)
-    if not match:
-        return {}
-
-    hour = int(match.group("hour"))
-    minute = int(match.group("minute"))
-    second = int(match.group("second") or 0)
-    ampm = match.group("ampm")
-    if ampm:
-        marker = ampm.lower()
-        if marker == "pm" and hour < 12:
-            hour += 12
-        elif marker == "am" and hour == 12:
-            hour = 0
-
-    timezone_text = match.group("tz")
-    return {
-        "hour": hour,
-        "minute": minute,
-        "second": second,
-        "timezone": _normalise_timezone(timezone_text),
-    }
-
-
-def _combine_date_time(date_value: datetime, time_parse: dict) -> str:
-    hour = int(time_parse.get("hour", 0))
-    minute = int(time_parse.get("minute", 0))
-    second = int(time_parse.get("second", 0))
-    dt = date_value.replace(hour=hour, minute=minute, second=second)
-    tz_text = time_parse.get("timezone")
-    tzinfo = _timezone_info(tz_text)
-    if tzinfo:
-        dt = dt.replace(tzinfo=tzinfo)
-    return dt.isoformat()
-
-
-def _normalise_timezone(value: str | None) -> str | None:
-    if not value:
-        return None
-    if value == "Z":
-        return "Z"
-    if re.fullmatch(r"[+-]\d{2}\d{2}", value):
-        return f"{value[:3]}:{value[3:]}"
-    return value
-
-
-def _timezone_info(value: str | None) -> timezone | None:
-    if not value:
-        return None
-    if value == "Z":
-        return timezone.utc
-    match = re.fullmatch(r"(?P<sign>[+-])(?P<hours>\d{2}):(?P<minutes>\d{2})", value)
-    if not match:
-        return None
-    delta = timedelta(
-        hours=int(match.group("hours")),
-        minutes=int(match.group("minutes")),
-    )
-    if match.group("sign") == "-":
-        delta = -delta
-    return timezone(delta)
-
-
-def _is_valid_iso(value: str) -> bool:
-    return _parse_iso_datetime(value) is not None
-
-
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _readable_time(candidate: dict) -> str:
-    date_text = candidate.get("date_text", "")
-    time_text = candidate.get("time_text", "")
-    return f"{date_text} {time_text}".strip() or "Unknown"
-
-
-def _dedupe_mentions(mentions: list[dict]) -> list[dict]:
-    unique = []
-    seen: set[tuple[str, str]] = set()
-    for mention in mentions:
-        key = (
-            str(mention.get("text", "")).casefold(),
-            str(mention.get("field", "")).casefold(),
-        )
-        if not key[0] or key in seen:
-            continue
-        seen.add(key)
-        unique.append(mention)
-    return unique
-
-
-def _clean_list(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    cleaned = []
-    seen = set()
-    for value in values:
-        text = _normalise_text(value)
-        if not text:
-            continue
-        key = text.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(text)
-    return cleaned
-
-
-def _normalise_text(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    return " ".join(value.split()).strip()
-
-
-def _snippet(text: str, limit: int = _MAX_TEXT_SNIPPET_CHARS) -> str:
-    return text[:limit].strip()
-
-
-def _excerpt_around(text: str, start: int, end: int, radius: int = 80) -> str:
-    left = max(0, start - radius)
-    right = min(len(text), end + radius)
-    return _normalise_text(text[left:right])
-
-
-async def _set_status(investigation_id: str, agent_id: str, status: str) -> None:
-    await collections.agent_runs().update_one(
-        {"investigation_id": investigation_id, "agent_id": agent_id},
-        {"$set": {"status": status, "updated_at": utcnow()}},
-        upsert=True,
-    )
-
-
-async def _append_line(investigation_id: str, agent_id: str, line: dict) -> None:
-    await collections.agent_runs().update_one(
-        {"investigation_id": investigation_id, "agent_id": agent_id},
-        {"$push": {"lines": line}, "$set": {"updated_at": utcnow()}},
-    )
-
-
-async def _complete(
-    investigation_id: str,
-    agent_id: str,
-    lines: list[dict],
-    summary: list[str],
-    output: dict,
-    status: str = "done",
-) -> None:
-    await collections.agent_runs().update_one(
-        {"investigation_id": investigation_id, "agent_id": agent_id},
-        {
-            "$set": {
-                "status": status,
-                "summary": summary,
-                "output": output,
-                "updated_at": utcnow(),
-            }
-        },
-    )
+def _clip(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"

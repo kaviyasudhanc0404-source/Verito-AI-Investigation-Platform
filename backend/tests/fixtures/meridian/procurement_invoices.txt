@@ -1,0 +1,16 @@
+[Document: procurement_invoices.pdf]
+
+## EVIDENCE EXHIBIT B - PROCUREMENT &amp; INVOICE RECORDS
+
+## Section A - Purchase Orders
+
+| PO No. | Date | Requeste d By | Vendor | Total (₹) | Approved By |
+|--------------|-----------|------------|------------|--------|--------|
+| PO-2026-0342 | 07-Mar-26 | A. Kumaras wamy (0587) | Kovai Building Solutions | 1,98,500 | A. Kumarasw amy (0587) |
+| PO-2026-0368 | 02-Apr-26 | S. Bhaskaran (0761) | Anand Electricals & Hardware | 4,32,600 | R. Iyer (0203) |
+
+## Section B - Invoice Records
+
+| Invoice No. | Date | Vendor | PO No. | Total (₹) | Paid On |
+|---|---|---|---|---|---|
+| INV-KBS-0091 | 08-Mar-26 | Kovai Building Sol. | PO-2026-0342 | 2,34,230 | 10-Mar-26 |

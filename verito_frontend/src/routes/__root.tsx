@@ -20,9 +20,7 @@ function NotFoundComponent() {
           CASE&nbsp;NOT&nbsp;FOUND
         </div>
         <h1 className="mt-4 text-7xl font-bold tracking-tight">404</h1>
-        <p className="mt-3 text-sm text-muted-foreground">
-          No evidence exists at this location.
-        </p>
+        <p className="mt-3 text-sm text-muted-foreground">No evidence exists at this location.</p>
         <Link
           to="/"
           className="mt-6 inline-flex items-center justify-center rounded-md bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
@@ -89,12 +87,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:title", content: "VERITO — AI Investigation Platform" },
       {
         property: "og:description",
-        content: "VERITO connects clues, reconstructs events and reveals the truth. A next-generation AI investigation workspace.",
+        content:
+          "VERITO connects clues, reconstructs events and reveals the truth. A next-generation AI investigation workspace.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: "VERITO — AI Investigation Platform" },
-      { name: "twitter:description", content: "VERITO connects clues, reconstructs events and reveals the truth. A next-generation AI investigation workspace." },
+      {
+        name: "twitter:description",
+        content:
+          "VERITO connects clues, reconstructs events and reveals the truth. A next-generation AI investigation workspace.",
+      },
     ],
     links: [
       { rel: "stylesheet", href: appCss },

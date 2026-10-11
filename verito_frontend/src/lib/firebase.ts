@@ -6,12 +6,7 @@
  */
 
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  type Auth,
-} from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup, type Auth } from "firebase/auth";
 
 // ── Firebase config — fill in your Firebase project values ────────────────────
 // Get these from: Firebase Console → Project Settings → General → Your apps
@@ -25,12 +20,7 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID ?? "",
 };
 
-const requiredConfigKeys = [
-  "apiKey",
-  "authDomain",
-  "projectId",
-  "appId",
-] as const;
+const requiredConfigKeys = ["apiKey", "authDomain", "projectId", "appId"] as const;
 
 function assertFirebaseConfigured(): void {
   const missing = requiredConfigKeys.filter((key) => !firebaseConfig[key]);

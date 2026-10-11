@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     groq_api_key: str
     groq_model: str = "openai/gpt-oss-20b"
     groq_whisper_model: str = "whisper-large-v3"
+    groq_timeout_seconds: float = 60.0
+    groq_connect_timeout_seconds: float = 10.0
+    groq_max_attempts: int = 5           # per request, for rate limits / timeouts / 5xx
+
+    # Report quality gate — see app/services/validation.py
+    quality_gate_policy: str = "partial"          # warn | partial | block
+    quality_max_fallback_ratio: float = 0.5       # share of LLM-assisted steps allowed to fall back
+    quality_max_failed_file_ratio: float = 0.25   # share of evidence files allowed to fail extraction
+    quality_max_rejected_findings: int = 0        # findings that failed validation
 
     # Gemini Vision API
     gemini_api_key: str = ""
@@ -50,25 +59,6 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     max_upload_mb: int = 50
 
-    # ── Token Budget ─────────────────────────────────────────────────────────
-    # These control per-REQUEST sizing, NOT provider TPM/rate limits.
-    # TPM = how many tokens per minute the provider allows across ALL requests.
-    # Per-request limit = how large a single request payload may be.
-    # These are two separate constraints; do not conflate them.
-    #
-    # Derived effective_input_budget =
-    #   llm_per_request_max_tokens
-    #   - llm_system_prompt_reserve
-    #   - llm_default_output_reserve
-    #   - llm_safety_margin
-    #
-    # Conservative defaults suitable for Groq free-tier observed endpoint limits.
-    # Adjust via .env for higher tiers or other providers.
-    llm_per_request_max_tokens: int = 16384   # Per-request ceiling (not model ctx window)
-    llm_system_prompt_reserve: int = 600      # Tokens reserved for system prompt
-    llm_default_output_reserve: int = 2000    # Default output token reservation
-    llm_safety_margin: int = 300              # Estimation error buffer
-    # → default effective_input_budget = 16384 - 600 - 2000 - 300 = 13484
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",

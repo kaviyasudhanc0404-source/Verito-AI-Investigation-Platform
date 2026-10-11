@@ -6,13 +6,7 @@ import { Composer } from "@/components/Composer";
 import { AgentStream } from "@/components/AgentStream";
 import { ReportView } from "@/components/ReportView";
 import { VeritoWordmark } from "@/components/VeritoWordmark";
-import {
-  AGENTS,
-  type CaseRecord,
-  type EvidenceItem,
-  type ChatMessage,
-  type FinalReport,
-} from "@/lib/investigation";
+import { AGENTS, type CaseRecord, type EvidenceItem, type ChatMessage } from "@/lib/investigation";
 import { investigationsApi, evidenceApi, chatApi } from "@/lib/api";
 import { isAuthenticated, clearToken, getUser } from "@/lib/auth-store";
 import { subscribeToInvestigation } from "@/lib/sse";
@@ -55,15 +49,16 @@ function backendToCase(inv: Awaited<ReturnType<typeof investigationsApi.get>>): 
       kind: e.kind as EvidenceItem["kind"],
       size: e.size,
     })),
-    runs: inv.runs.length > 0
-      ? inv.runs.map((r) => ({
-          id: r.id as CaseRecord["runs"][number]["id"],
-          status: r.status as CaseRecord["runs"][number]["status"],
-          lines: r.lines as CaseRecord["runs"][number]["lines"],
-          summary: r.summary,
-        }))
-      : makeEmptyRuns(),
-    report: inv.report as FinalReport | undefined,
+    runs:
+      inv.runs.length > 0
+        ? inv.runs.map((r) => ({
+            id: r.id as CaseRecord["runs"][number]["id"],
+            status: r.status as CaseRecord["runs"][number]["status"],
+            lines: r.lines as CaseRecord["runs"][number]["lines"],
+            summary: r.summary,
+          }))
+        : makeEmptyRuns(),
+    report: inv.report,
     chat: inv.chat.map((m) => ({
       id: m.id,
       role: m.role,
@@ -88,48 +83,50 @@ function Workspace() {
   const [sessionStart] = useState(() => Date.now());
   const sseCleanupRef = useRef<(() => void) | null>(null);
 
-
   // Load investigations from backend on mount
   useEffect(() => {
     if (!isAuthenticated()) return;
-    investigationsApi.list().then((list) => {
-      const mapped = list.map((item) => ({
-        id: item.id,
-        title: item.title,
-        prompt: "",
-        createdAt: new Date(item.created_at).getTime(),
-        status: item.status,
-        evidence: [],
-        runs: makeEmptyRuns(),
-        chat: [],
-      } satisfies CaseRecord));
-      setCases(mapped);
-      setPinnedIds(new Set(list.filter((item) => item.pinned).map((item) => item.id)));
-      setActiveId(mapped[0]?.id ?? null);
-      setHydrated(true);
-    }).catch(() => setHydrated(true));
+    investigationsApi
+      .list()
+      .then((list) => {
+        const mapped = list.map(
+          (item) =>
+            ({
+              id: item.id,
+              title: item.title,
+              prompt: "",
+              createdAt: new Date(item.created_at).getTime(),
+              status: item.status,
+              evidence: [],
+              runs: makeEmptyRuns(),
+              chat: [],
+            }) satisfies CaseRecord,
+        );
+        setCases(mapped);
+        setPinnedIds(new Set(list.filter((item) => item.pinned).map((item) => item.id)));
+        setActiveId(mapped[0]?.id ?? null);
+        setHydrated(true);
+      })
+      .catch(() => setHydrated(true));
   }, []);
 
   // Load full case when active changes
   useEffect(() => {
     if (!activeId) return;
-    investigationsApi.get(activeId).then((inv) => {
-      const c = backendToCase(inv);
-      setCases((prev) => prev.map((x) => (x.id === activeId ? c : x)));
-    }).catch(() => {});
+    investigationsApi
+      .get(activeId)
+      .then((inv) => {
+        const c = backendToCase(inv);
+        setCases((prev) => prev.map((x) => (x.id === activeId ? c : x)));
+      })
+      .catch(() => {});
   }, [activeId]);
 
-  const active = useMemo(
-    () => cases.find((c) => c.id === activeId) ?? null,
-    [cases, activeId],
-  );
+  const active = useMemo(() => cases.find((c) => c.id === activeId) ?? null, [cases, activeId]);
 
-  const updateCase = useCallback(
-    (id: string, updater: (c: CaseRecord) => CaseRecord) => {
-      setCases((prev) => prev.map((c) => (c.id === id ? updater(c) : c)));
-    },
-    [],
-  );
+  const updateCase = useCallback((id: string, updater: (c: CaseRecord) => CaseRecord) => {
+    setCases((prev) => prev.map((c) => (c.id === id ? updater(c) : c)));
+  }, []);
 
   const handleNew = () => {
     setActiveId(null);
@@ -152,17 +149,21 @@ function Workspace() {
       return;
     }
     setCases((prev) => prev.filter((c) => c.id !== id));
-    setPinnedIds((prev) => { const s = new Set(prev); s.delete(id); return s; });
+    setPinnedIds((prev) => {
+      const s = new Set(prev);
+      s.delete(id);
+      return s;
+    });
     if (activeId === id) setActiveId(null);
   };
 
   const handleRename = async (id: string, title: string) => {
     const previousTitle = cases.find((c) => c.id === id)?.title ?? "Untitled case";
-    setCases((prev) => prev.map((c) => c.id === id ? { ...c, title } : c));
+    setCases((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
     try {
       await investigationsApi.rename(id, title);
     } catch {
-      setCases((prev) => prev.map((c) => c.id === id ? { ...c, title: previousTitle } : c));
+      setCases((prev) => prev.map((c) => (c.id === id ? { ...c, title: previousTitle } : c)));
     }
   };
 
@@ -170,13 +171,15 @@ function Workspace() {
     const nextPinned = !pinnedIds.has(id);
     setPinnedIds((prev) => {
       const s = new Set(prev);
-      if (s.has(id)) s.delete(id); else s.add(id);
+      if (s.has(id)) s.delete(id);
+      else s.add(id);
       return s;
     });
     investigationsApi.update(id, { pinned: nextPinned }).catch(() => {
       setPinnedIds((prev) => {
         const s = new Set(prev);
-        if (nextPinned) s.delete(id); else s.add(id);
+        if (nextPinned) s.delete(id);
+        else s.add(id);
         return s;
       });
     });
@@ -191,7 +194,11 @@ function Workspace() {
     setCurrentUser(updated);
   };
 
-  const startInvestigation = async (text: string, evidenceFiles: EvidenceItem[], rawFiles?: File[]) => {
+  const startInvestigation = async (
+    text: string,
+    evidenceFiles: EvidenceItem[],
+    rawFiles?: File[],
+  ) => {
     const title = text.slice(0, 60) || "Untitled case";
 
     // 1. Create the investigation in the backend
@@ -240,7 +247,9 @@ function Workspace() {
           const updated = await investigationsApi.get(inv.id);
           const c = backendToCase(updated);
           setCases((prev) => prev.map((x) => (x.id === inv.id ? c : x)));
-        } catch {}
+        } catch (err) {
+          console.error("Could not load the finished investigation:", err);
+        }
       },
     );
   };
@@ -403,8 +412,19 @@ function SecurityPanel({
   onClose: () => void;
 }) {
   const elapsed = Math.floor((Date.now() - sessionStart) / 60000);
-  const sessionLabel = elapsed < 1 ? "<1m" : elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed / 60)}h${elapsed % 60}m`;
-  const initials = user?.name?.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase() ?? "?";
+  const sessionLabel =
+    elapsed < 1
+      ? "<1m"
+      : elapsed < 60
+        ? `${elapsed}m`
+        : `${Math.floor(elapsed / 60)}h${elapsed % 60}m`;
+  const initials =
+    user?.name
+      ?.split(" ")
+      .map((w) => w[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() ?? "?";
 
   return (
     <motion.div
@@ -419,8 +439,12 @@ function SecurityPanel({
         <div className="flex items-center gap-1.5">
           <Shield className="h-3.5 w-3.5 text-[color:var(--crimson-glow)]" />
           <div>
-            <div className="font-mono text-[9px] tracking-[0.25em] text-foreground/40">ACCESS · POINT</div>
-            <div className="text-xs font-semibold text-foreground leading-tight">Security & Session</div>
+            <div className="font-mono text-[9px] tracking-[0.25em] text-foreground/40">
+              ACCESS · POINT
+            </div>
+            <div className="text-xs font-semibold text-foreground leading-tight">
+              Security & Session
+            </div>
           </div>
         </div>
         <button
@@ -437,8 +461,12 @@ function SecurityPanel({
           {initials}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-semibold text-foreground">{user?.name ?? "Unknown"}</div>
-          <div className="truncate font-mono text-[9px] text-foreground/40">{user?.email ?? "—"}</div>
+          <div className="truncate text-xs font-semibold text-foreground">
+            {user?.name ?? "Unknown"}
+          </div>
+          <div className="truncate font-mono text-[9px] text-foreground/40">
+            {user?.email ?? "—"}
+          </div>
         </div>
         <span className="flex items-center gap-1">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
@@ -455,7 +483,9 @@ function SecurityPanel({
 
       {/* Security rows */}
       <div className="px-3 py-2.5 space-y-1">
-        <div className="font-mono text-[9px] tracking-[0.25em] text-foreground/30 mb-1.5">SECURITY</div>
+        <div className="font-mono text-[9px] tracking-[0.25em] text-foreground/30 mb-1.5">
+          SECURITY
+        </div>
         {[
           { label: "Encryption", value: "AES-256" },
           { label: "Auth", value: "JWT Bearer" },
@@ -474,12 +504,28 @@ function SecurityPanel({
   );
 }
 
-function StatCell({ icon, label, value, green }: { icon: React.ReactNode; label: string; value: string; green?: boolean }) {
+function StatCell({
+  icon,
+  label,
+  value,
+  green,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  green?: boolean;
+}) {
   return (
     <div className="flex flex-col items-center gap-0.5 px-2 py-2">
-      <span className={`${green ? "text-emerald-400" : "text-[color:var(--crimson-glow)]"}`}>{icon}</span>
-      <span className={`text-xs font-bold ${green ? "text-emerald-400" : "text-foreground"}`}>{value}</span>
-      <span className="font-mono text-[8px] tracking-widest text-foreground/30">{label.toUpperCase()}</span>
+      <span className={`${green ? "text-emerald-400" : "text-[color:var(--crimson-glow)]"}`}>
+        {icon}
+      </span>
+      <span className={`text-xs font-bold ${green ? "text-emerald-400" : "text-foreground"}`}>
+        {value}
+      </span>
+      <span className="font-mono text-[8px] tracking-widest text-foreground/30">
+        {label.toUpperCase()}
+      </span>
     </div>
   );
 }
@@ -495,9 +541,7 @@ function EmptyWorkspace({
     <div className="mx-auto flex min-h-full max-w-3xl flex-col items-center justify-center px-4 py-16">
       <div className="mb-8 text-center">
         <VeritoWordmark size="md" />
-        <div className="mt-6 text-lg text-foreground/80 md:text-xl">
-          What are we investigating?
-        </div>
+        <div className="mt-6 text-lg text-foreground/80 md:text-xl">What are we investigating?</div>
         <div className="mt-1 text-sm text-muted-foreground">
           Describe the case, attach evidence, or paste a lead.
         </div>
@@ -541,9 +585,7 @@ function ActiveCase({
           CASE&nbsp;·&nbsp;{caseRec.id.replace("inv_", "").toUpperCase()}
         </div>
         <div className="mt-2 text-lg font-semibold">{caseRec.title || "Untitled case"}</div>
-        {caseRec.prompt && (
-          <p className="mt-2 text-sm text-foreground/80">{caseRec.prompt}</p>
-        )}
+        {caseRec.prompt && <p className="mt-2 text-sm text-foreground/80">{caseRec.prompt}</p>}
         {caseRec.evidence.length > 0 && (
           <div className="mt-4 flex flex-wrap gap-2">
             {caseRec.evidence.map((e) => (
@@ -565,13 +607,16 @@ function ActiveCase({
       <AgentStream runs={caseRec.runs} />
 
       {/* Report */}
-      {caseRec.report && <ReportView report={caseRec.report} />}
+      {caseRec.report && <ReportView report={caseRec.report} investigationId={caseRec.id} />}
 
       {/* Chat */}
       {caseRec.chat.length > 0 && (
         <div className="space-y-3">
           {caseRec.chat.map((m) => (
-            <div key={m.id} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+            <div
+              key={m.id}
+              className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
+            >
               <div
                 className={
                   m.role === "user"

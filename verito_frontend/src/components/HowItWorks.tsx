@@ -40,8 +40,7 @@ export function HowItWorks() {
         className="pointer-events-none absolute inset-0 opacity-[0.08]"
         aria-hidden
         style={{
-          backgroundImage:
-            "radial-gradient(oklch(0.9 0.14 82 / 0.5) 1px, transparent 1px)",
+          backgroundImage: "radial-gradient(oklch(0.9 0.14 82 / 0.5) 1px, transparent 1px)",
           backgroundSize: "28px 28px",
         }}
       />
@@ -100,7 +99,10 @@ export function HowItWorks() {
                 className="relative pt-10"
               >
                 {/* Thread anchor / pushpin */}
-                <div className="pin-thumbtack absolute left-1/2 top-4 z-20 -translate-x-1/2" aria-hidden />
+                <div
+                  className="pin-thumbtack absolute left-1/2 top-4 z-20 -translate-x-1/2"
+                  aria-hidden
+                />
                 {/* Short string from pin down to card */}
                 <div
                   className="absolute left-1/2 top-6 z-10 h-6 w-px -translate-x-1/2"
@@ -147,9 +149,7 @@ export function HowItWorks() {
                   <div className="mt-6 font-brand text-[15px] font-bold uppercase tracking-wider text-foreground">
                     {s.title}
                   </div>
-                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                    {s.text}
-                  </p>
+                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{s.text}</p>
 
                   {/* Bottom accent line */}
                   <div className="mt-5 flex items-center gap-2">

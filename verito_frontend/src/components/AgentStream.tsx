@@ -10,9 +10,10 @@ import {
   Link2,
   Loader2,
   Scan,
+  ShieldCheck,
   User,
 } from "lucide-react";
-import { AGENTS, type AgentLine, type AgentRun } from "@/lib/investigation";
+import { AGENTS, FINISHED_STATUSES, type AgentLine, type AgentRun } from "@/lib/investigation";
 
 const iconFor = {
   collector: Layers,
@@ -20,6 +21,7 @@ const iconFor = {
   timeline: Clock,
   linker: Link2,
   subject: User,
+  validator: ShieldCheck,
   report: FileText,
 } as const;
 
@@ -49,8 +51,54 @@ function LineRow({ line }: { line: AgentLine }) {
   );
 }
 
+const STATUS_STYLE: Record<
+  AgentRun["status"],
+  { label: string; chip: string; icon: string; Glyph?: typeof Check }
+> = {
+  done: {
+    label: "COMPLETE",
+    chip: "bg-emerald-400/10 text-emerald-300",
+    icon: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300",
+    Glyph: Check,
+  },
+  completed_with_warnings: {
+    label: "WARNINGS",
+    chip: "bg-amber-400/10 text-amber-300",
+    icon: "border-amber-400/30 bg-amber-400/10 text-amber-300",
+    Glyph: AlertTriangle,
+  },
+  completed_with_fallback: {
+    label: "USED FALLBACK",
+    chip: "bg-amber-400/10 text-amber-300",
+    icon: "border-amber-400/30 bg-amber-400/10 text-amber-300",
+    Glyph: AlertTriangle,
+  },
+  failed: {
+    label: "FAILED",
+    chip: "bg-red-500/10 text-red-300",
+    icon: "border-red-500/30 bg-red-500/10 text-red-300",
+    Glyph: AlertTriangle,
+  },
+  blocked: {
+    label: "BLOCKED",
+    chip: "bg-white/10 text-foreground/60",
+    icon: "border-white/15 bg-white/10 text-foreground/60",
+  },
+  running: {
+    label: "RUNNING",
+    chip: "bg-[color:var(--crimson)]/15 text-[color:var(--crimson-glow)]",
+    icon: "border-[color:var(--crimson)]/40 bg-[color:var(--crimson)]/10 text-[color:var(--crimson-glow)]",
+    Glyph: Loader2,
+  },
+  idle: {
+    label: "QUEUED",
+    chip: "bg-white/5 text-foreground/50",
+    icon: "border-white/10 bg-white/5 text-foreground/50",
+  },
+};
+
 export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
-  const meta = AGENTS[index];
+  const meta = AGENTS.find((agent) => agent.id === run.id) ?? AGENTS[0];
   const Icon = iconFor[meta.id];
   const [open, setOpen] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -59,45 +107,18 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [run.lines.length]);
 
-  const statusChip =
-    run.status === "done" ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-emerald-300">
-        <Check className="h-3 w-3" /> COMPLETE
-      </span>
-    ) : run.status === "completed_with_warnings" ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-amber-300">
-        <AlertTriangle className="h-3 w-3" /> WARNINGS
-      </span>
-    ) : run.status === "failed" ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-red-300">
-        <AlertTriangle className="h-3 w-3" /> FAILED
-      </span>
-    ) : run.status === "blocked" ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-foreground/60">
-        BLOCKED
-      </span>
-    ) : run.status === "running" ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-[color:var(--crimson)]/15 px-2 py-0.5 text-[10px] font-medium tracking-widest text-[color:var(--crimson-glow)]">
-        <Loader2 className="h-3 w-3 animate-spin" /> RUNNING
-      </span>
-    ) : (
-      <span className="inline-flex items-center gap-1 rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-medium tracking-widest text-foreground/50">
-        QUEUED
-      </span>
-    );
-
-  const iconState =
-    run.status === "done"
-      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
-      : run.status === "completed_with_warnings"
-        ? "border-amber-400/30 bg-amber-400/10 text-amber-300"
-        : run.status === "failed"
-          ? "border-red-500/30 bg-red-500/10 text-red-300"
-          : run.status === "blocked"
-            ? "border-white/15 bg-white/10 text-foreground/60"
-            : run.status === "running"
-              ? "border-[color:var(--crimson)]/40 bg-[color:var(--crimson)]/10 text-[color:var(--crimson-glow)]"
-              : "border-white/10 bg-white/5 text-foreground/50";
+  const style = STATUS_STYLE[run.status];
+  const statusChip = (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-widest ${style.chip}`}
+    >
+      {style.Glyph && (
+        <style.Glyph className={`h-3 w-3 ${run.status === "running" ? "animate-spin" : ""}`} />
+      )}
+      {style.label}
+    </span>
+  );
+  const iconState = style.icon;
 
   return (
     <motion.div
@@ -125,7 +146,7 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="font-mono text-[10px] tracking-widest text-foreground/40">
-              0{index + 1}
+              {String(index + 1).padStart(2, "0")}
             </span>
             <span className="truncate text-sm font-semibold">{meta.name}</span>
             {statusChip}
@@ -178,9 +199,7 @@ export function AgentCard({ run, index }: { run: AgentRun; index: number }) {
 }
 
 export function AgentStream({ runs }: { runs: AgentRun[] }) {
-  const complete = runs.filter(
-    (r) => r.status === "done" || r.status === "completed_with_warnings",
-  ).length;
+  const complete = runs.filter((r) => FINISHED_STATUSES.includes(r.status)).length;
   const failed = runs.filter((r) => r.status === "failed").length;
   const blocked = runs.filter((r) => r.status === "blocked").length;
   const total = runs.length || AGENTS.length;

@@ -1,0 +1,6 @@
+Invoice No,Invoice Date,Vendor,Amount,Status
+INV-2026-0101,2026-02-03,Example Supplies Ltd,"$4,200.00",Paid
+INV-2026-0102,2026-02-10,Example Supplies Ltd,"$9,950.00",Paid
+INV-2026-0103,2026-02-17,Sample Traders,"$1,100.00",Paid
+INV-2026-0104,2026-02-27,Sample Traders,"$2,480.00",Open
+INV-2026-0105,2026-03-02,Example Supplies Ltd,"$5,000.00",Paid

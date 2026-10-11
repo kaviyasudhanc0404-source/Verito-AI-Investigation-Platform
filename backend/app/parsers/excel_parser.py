@@ -1,90 +1,40 @@
 """
 parsers/excel_parser.py
 ------------------------
-Extract structured text from Excel evidence files (.xlsx, .xls) using pandas.
+Render every worksheet of an Excel file (.xlsx / .xls) as labelled record lines.
 
-Uses pandas with the openpyxl engine to:
-  - Read all worksheets
-  - Render each worksheet as labelled key-value rows (matching csv_parser style)
-  - Preserve column headers and all cell values
+    [Excel Evidence: file.xlsx]
 
-Output format:
-  [Excel Evidence: filename.xlsx]
-  [Sheet: Sheet1]  Columns: Col1 | Col2 | ...  Total rows: N
-
-  [Row 1]  Col1: Value1 | Col2: Value2 | ...
-  [Row 2]  ...
-
-  [Sheet: Sheet2]
-  ...
+    [Sheet: Purchase Orders]
+    Columns: PO Number | Date | …
+    Total rows: N
+    [Row 1] PO Number: PO-2026-0341 | Date: 2026-03-05 | …
 """
 
 from __future__ import annotations
 
+import io
+
+from app.parsers import render_table
+
 
 def parse(file_bytes: bytes, filename: str = "data.xlsx") -> str:
-    """
-    Parse an Excel file (.xlsx / .xls) into human-readable evidence text.
-
-    All sheets are extracted. Each row is rendered as header: value pairs.
-
-    Args:
-        file_bytes: Raw .xlsx / .xls bytes.
-        filename:   Original filename (for context header).
-
-    Returns:
-        Structured plain text with all sheet data.
-    """
-    try:
-        import io
-        import pandas as pd
-    except ImportError as exc:
-        raise ImportError(
-            "pandas and openpyxl are required for Excel parsing. "
-            "Run: pip install pandas openpyxl"
-        ) from exc
+    import pandas as pd
 
     engine = "openpyxl" if filename.lower().endswith(".xlsx") else "xlrd"
-
+    header = f"[Excel Evidence: {filename}]"
     try:
-        sheets: dict = pd.read_excel(
-            io.BytesIO(file_bytes),
-            sheet_name=None,   # load ALL sheets
-            engine=engine,
-            dtype=str,         # keep everything as string — preserves dates, codes, etc.
-        )
+        sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, engine=engine, dtype=str)
     except Exception as exc:
-        return f"[Excel Evidence: {filename}]\n(Failed to parse: {exc})"
+        return f"{header}\n(Failed to parse: {exc})"
 
-    if not sheets:
-        return f"[Excel Evidence: {filename}]\n(No sheets found)"
-
-    output_lines: list[str] = [f"[Excel Evidence: {filename}]"]
-
-    for sheet_name, df in sheets.items():
-        # Drop completely empty rows and columns
-        df = df.dropna(how="all").dropna(axis=1, how="all")
-
-        if df.empty:
-            output_lines.append(f"\n[Sheet: {sheet_name}]")
-            output_lines.append("(Empty sheet)")
+    lines = [header]
+    for sheet_name, frame in sheets.items():
+        frame = frame.dropna(how="all").dropna(axis=1, how="all")
+        lines += ["", f"[Sheet: {sheet_name}]"]
+        if frame.empty:
+            lines.append("(Empty sheet)")
             continue
-
-        # Clean header names
-        headers = [str(col).strip() or f"Col_{i+1}" for i, col in enumerate(df.columns)]
-
-        output_lines.append(f"\n[Sheet: {sheet_name}]")
-        output_lines.append(f"Columns: {' | '.join(headers)}")
-        output_lines.append(f"Total rows: {len(df)}")
-        output_lines.append("")
-
-        for row_num, (_, row) in enumerate(df.iterrows(), start=1):
-            pairs = " | ".join(
-                f"{headers[i]}: {str(val).strip()}"
-                for i, val in enumerate(row)
-                if str(val).strip() not in {"", "nan", "None"}
-            )
-            if pairs:
-                output_lines.append(f"[Row {row_num}] {pairs}")
-
-    return "\n".join(output_lines).strip()
+        columns = [str(col).strip() or f"Column {i + 1}" for i, col in enumerate(frame.columns)]
+        lines += render_table(columns, frame.values.tolist())
+    return "\n".join(lines).strip()

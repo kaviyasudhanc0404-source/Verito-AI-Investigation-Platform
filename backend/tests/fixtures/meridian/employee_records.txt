@@ -1,0 +1,11 @@
+[Excel Evidence: employee_records.xlsx]
+
+[Sheet: Employee Master]
+Columns: Employee ID | Full Name | Designation | Department | Work Email
+Total rows: 5
+
+[Row 1] Employee ID: MIL-EMP-0587 | Full Name: Arvind Kumaraswamy | Designation: Procurement Manager, Infrastructure Projects | Department: Procurement | Work Email: arvind.kumaraswamy@meridianinfra.com
+[Row 2] Employee ID: MIL-EMP-0761 | Full Name: Sanjay Bhaskaran | Designation: Procurement Executive | Department: Procurement | Work Email: sanjay.bhaskaran@meridianinfra.com
+[Row 3] Employee ID: MIL-EMP-0812 | Full Name: Meera Chandrasekaran | Designation: Accounts Payable Executive, Finance | Department: Finance | Work Email: meera.chandrasekaran@meridianinfra.com
+[Row 4] Employee ID: MIL-EMP-0203 | Full Name: Ramesh Iyer | Designation: Head - Finance | Department: Finance | Work Email: ramesh.iyer@meridianinfra.com
+[Row 5] Employee ID: MIL-EMP-1042 | Full Name: Divya Raghunathan | Designation: Senior Internal Auditor | Department: Internal Audit | Work Email: divya.raghunathan@meridianinfra.com

@@ -12,7 +12,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import auth, investigations, evidence, agents, reports, chat
-from app.routes import evidence_routes  # New architecture evidence routes
 from app.core.config import get_settings
 from app.database.mongodb import connect, disconnect
 
@@ -49,7 +48,6 @@ API_PREFIX = "/api"
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(investigations.router, prefix=API_PREFIX)
 app.include_router(evidence.router, prefix=API_PREFIX)
-app.include_router(evidence_routes.router, prefix=API_PREFIX)  # New evidence pipeline
 app.include_router(agents.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
 app.include_router(chat.router, prefix=API_PREFIX)
