@@ -187,3 +187,37 @@ def test_document_findings_quote_their_source(report):
     assert goods_receipt.claim == "Reported statement"
     assert any("processed on priority" in title for title in document_findings)       # witness account
     assert not any("do not establish" in f.title for f in report.findings)              # disclaimers are not findings
+
+
+# ── Report review fixes ───────────────────────────────────────────────────────
+
+def test_excerpts_show_every_kind_of_record_a_finding_rests_on(outputs):
+    onboarding = next(f for f in outputs["validator"]["findings"] if f["category"] == "Vendor onboarding")
+    texts = " ".join(e["text"] for e in onboarding["excerpts"])
+    assert "Event Type" in texts or "Last Updated" in texts               # the vendor / bank-change records
+    threshold = next(f for f in outputs["validator"]["findings"] if f["category"] == "Approval controls")
+    orders = {i for e in threshold["excerpts"] for i in find_ids(e["text"]) if i.startswith("PO-")}
+    assert len(orders) == 5                                               # all five orders, not one twice
+
+
+def test_scope_counts_documents_not_copies(report):
+    contents = next(item for item in report.scope if "evidence files were analysed" in item)
+    assert "7 purchase orders" in contents                                # 9 rows, 7 distinct orders
+
+
+def test_partial_identity_matches_never_give_high_confidence(report):
+    for finding in report.findings:
+        if "partial name" in finding.confidence_basis:
+            assert finding.confidence != "high"
+
+
+def test_pdf_text_survives_characters_the_font_cannot_draw(report):
+    import pypdfium2 as pdfium
+
+    from app.schemas.report import ReportResponse as Report
+
+    content, _, _ = export_report(Report.model_validate({**report.model_dump(), "open_questions": [
+        "What is the status of the goods‑receipt note?"]}), "pdf")
+    pdf = pdfium.PdfDocument(content)
+    text = "".join(pdf[i].get_textpage().get_text_range() for i in range(len(pdf)))
+    assert "goods-receipt note" in text and "■" not in text

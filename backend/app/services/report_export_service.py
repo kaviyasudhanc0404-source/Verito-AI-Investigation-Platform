@@ -12,6 +12,7 @@ the same footer and page numbers. Sections with no content are left out.
 from __future__ import annotations
 
 import re
+import unicodedata
 from io import BytesIO
 from typing import Literal
 from xml.sax.saxutils import escape
@@ -23,7 +24,8 @@ ExportFormat = Literal["pdf", "docx", "json"]
 
 _CRIMSON = (185, 28, 53)
 _DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-_PDF_SAFE = {"₹": "Rs. ", "↔": "<->", "→": "->", "✓": "-"}
+_PDF_SAFE = {"₹": "Rs. ", "↔": "<->", "→": "->", "✓": "-", "\u2010": "-", "\u2011": "-", "\u2212": "-",
+             "\u00a0": " ", "\u202f": " "}
 _FOOTER = "VERITO investigation report — confidential"
 
 # ("heading", text) | ("subheading", text) | ("paragraph", markup) | ("bullets", [text]) | ("table", headers, rows)
@@ -141,9 +143,11 @@ def _render_pdf(title: str, blocks: list[Block]) -> bytes:
     from reportlab.platypus import ListFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     def safe(text: str) -> str:
+        """Text the PDF's built-in fonts (Windows-1252) can draw; anything else becomes its closest form."""
         for symbol, replacement in _PDF_SAFE.items():
             text = text.replace(symbol, replacement)
-        return text
+        text = unicodedata.normalize("NFKC", text)
+        return text.encode("cp1252", "replace").decode("cp1252")
 
     styles = getSampleStyleSheet()
     crimson = colors.Color(*(c / 255 for c in _CRIMSON))

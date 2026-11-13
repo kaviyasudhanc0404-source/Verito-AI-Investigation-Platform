@@ -92,7 +92,8 @@ async def run(ctx: PipelineContext, agent: AgentRun) -> AgentResult:
     people = {name for p in profiles.values() for name in p["people"]}
     orgs = {name for p in profiles.values() for name in p["organisations"]}
 
-    await agent.log("ok", f"Complete: {len(people)} people, {len(orgs)} organisations, {len(findings)} findings.")
+    await agent.log("ok", f"Complete: {len(people)} people, {len(orgs)} organisations, "
+                          f"{len(findings)} notes from narrative text (checked later by the validator).")
     output = {
         "evidence": profiles,
         "findings": findings,
@@ -101,7 +102,7 @@ async def run(ctx: PipelineContext, agent: AgentRun) -> AgentResult:
         "organisations": sorted(orgs),
         "chunks": {"total": len(chunks), "narrative": len(narrative), "fallback": fallback},
     }
-    summary = [f"{len(people)} people", f"{len(orgs)} organisations", f"{len(case.records)} records", f"{len(findings)} findings"]
+    summary = [f"{len(people)} people", f"{len(orgs)} organisations", f"{len(case.records)} records", f"{len(findings)} notes"]
     counts = {"chunks": len(chunks), "narrative_chunks": len(narrative), "fallback_chunks": fallback,
               "records": len(case.records), "entities": len(case.registry.entities)}
     return AgentResult(output, summary, agent.status, counts=counts)

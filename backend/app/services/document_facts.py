@@ -26,7 +26,7 @@ from app.services.values import find_ids, prose_sentences
 SIGNAL = re.compile(
     r"\b(not (?:located|found|available|on file|verified)|(?:was|were) not|no [\w-]+(?: [\w-]+){0,6} (?:was|were) "
     r"(?:located|found)|without|missing|on priority|expedit\w*|directly|instruct\w*|asked|requests? that|"
-    r"declaration of interest|conflict of interest|relationship|referred|recall\w*|"
+    r"declaration of interest|conflict of interest|relationship|referred for|recall\w*|"
     r"did not (?:receive|verify|know|pursue))\b", re.IGNORECASE)
 # Sentences about the document itself or disclaimers, which are not facts about the case.
 _META = re.compile(
@@ -47,21 +47,20 @@ def select_document_facts(case: Case, analyzer: dict, observations: list[dict]) 
 
 
 def _rank(facts: list[dict], observations: list[dict]) -> list[dict]:
-    """Order facts by investigative value; drop duplicates, meta text and repeats of observations."""
-    flagged = {i for o in observations for i in find_ids(o["detail"])}
-    scored, seen = [], set()
+    """Keep statements that carry an investigative signal — those citing identifiers first; drop
+    duplicates, labels, meta text and repeats of observations."""
+    kept, seen = [], set()
     for index, fact in enumerate(facts):
         text = " ".join(str(fact.get("text", "")).split()).strip("'\"“”‘’ ")
         key = re.sub(r"\W+", " ", text.casefold()).strip()
-        if not 40 <= len(text) <= 320 or key in seen or _LABEL_LINE.match(text) or _META.search(text)                 or _repeats_observation(text, observations):
+        if not 40 <= len(text) <= 320 or key in seen or not SIGNAL.search(text) or _LABEL_LINE.match(text) \
+                or _META.search(text) or _repeats_observation(text, observations):
             continue
         seen.add(key)
-        ids, signal = set(find_ids(text)), bool(SIGNAL.search(text))
-        score = 3 * signal + bool(ids) - 2 * (len(ids & flagged) >= 2 and not signal)
-        scored.append((score, index, {"text": text, "evidence_id": fact["evidence_id"]}))
+        kept.append((not find_ids(text), index, {"text": text, "evidence_id": fact["evidence_id"]}))
     chosen, per_file = [], Counter()
-    for score, _, fact in sorted(scored, key=lambda entry: (-entry[0], entry[1])):
-        if score > 0 and per_file[fact["evidence_id"]] < _MAX_PER_FILE:
+    for _, _, fact in sorted(kept, key=lambda entry: entry[:2]):
+        if per_file[fact["evidence_id"]] < _MAX_PER_FILE:
             chosen.append(fact)
             per_file[fact["evidence_id"]] += 1
     return chosen[:_MAX_FACTS]

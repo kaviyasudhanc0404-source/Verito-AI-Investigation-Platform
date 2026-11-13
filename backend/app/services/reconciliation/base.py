@@ -68,8 +68,26 @@ class Observation:
             "rule": self.rule, "why": self.why, "question": self.question, "verify": self.verify,
             "qualifiers": self.qualifiers, "calculation": self.calculation,
             "records": [r.citation for r in unique],
-            "excerpts": [r.excerpt() for r in unique[:_MAX_EXCERPTS]],
+            "excerpts": [r.excerpt() for r in _representative(unique)],
         }
+
+
+def _representative(records: list[Record]) -> list[Record]:
+    """Up to _MAX_EXCERPTS records covering every kind of record cited (e.g. the orders *and* the
+    vendor change log), distinct documents before second copies of the same document."""
+    groups: dict[str, list[Record]] = {}
+    for record in records:
+        groups.setdefault(record.kind, []).append(record)
+    for kind, items in groups.items():
+        first = list({r.primary_id or r.ref: r for r in items}.values())
+        chosen = {id(r) for r in first}
+        groups[kind] = first + [r for r in items if id(r) not in chosen]
+    picked: list[Record] = []
+    while len(picked) < _MAX_EXCERPTS and any(groups.values()):
+        for items in groups.values():
+            if items and len(picked) < _MAX_EXCERPTS:
+                picked.append(items.pop(0))
+    return picked
 
 
 def calculation(operation: str, inputs: list, result, description: str, unit: str = "") -> dict:

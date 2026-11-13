@@ -166,3 +166,10 @@ def test_field_labels_are_not_quoted_as_statements(meridian_case):
                                {"text": "Submitted By: Ms. Divya Raghunathan, Senior Internal Auditor", "evidence_id": "E-001"}]}
     facts = select_document_facts(meridian_case, analyzer, [])
     assert not any(f["text"].startswith(("Transaction ID", "Submitted By")) for f in facts)
+
+
+def test_statements_need_an_investigative_signal(meridian_case):
+    from app.services.document_facts import select_document_facts
+
+    analyzer = {"statements": [{"text": "PO-2026-0342 is ready for the Site B requirement, as discussed.", "evidence_id": "E-004"}]}
+    assert not any("is ready for the Site B" in f["text"] for f in select_document_facts(meridian_case, analyzer, []))

@@ -45,7 +45,7 @@ Never say anyone is guilty, corrupt, committed fraud, or acted intentionally —
 Return JSON:
 {
   "title": "max 8 words naming the matter",
-  "scope": "one sentence: what was examined (which records, which parties, which period)",
+  "scope": "one sentence: what was examined (which records and parties) during the period given",
   "caveat": "one sentence: what the evidence does not yet establish",
   "open_questions": ["max 6 questions the evidence raises but does not answer"],
   "next_steps": ["max 6 concrete, neutral actions for the investigator"]
@@ -86,7 +86,8 @@ async def run(ctx: PipelineContext, agent: AgentRun) -> AgentResult:
 
     await agent.log("scan", "Writing the case narrative...")
     rules = _rule_narrative(flags, findings, focus)
-    narrative, problem = await _narrative(ctx.prompt, case, findings, people, key_events, rules)
+    narrative, problem = await _narrative(ctx.prompt, case, findings, people, key_events, rules,
+                                          timeline.get("window", ""))
     if problem:
         await agent.fallback(f"AI writing unavailable ({problem}) — report written from the rule-based findings.")
     generated_by = "rules" if problem else "ai"
@@ -132,13 +133,14 @@ async def run(ctx: PipelineContext, agent: AgentRun) -> AgentResult:
 # ── Narrative (LLM with rule-based fallback) ──────────────────────────────────
 
 async def _narrative(prompt: str, case: Case, findings: list[dict], people: list[dict], key_events: list[dict],
-                     rules: dict) -> tuple[dict, str]:
+                     rules: dict, period: str) -> tuple[dict, str]:
     """Return (narrative, problem). `problem` is empty when the LLM narrative was used."""
     context = {
         "investigation_question": prompt or "Not specified — review the evidence for anything that needs attention.",
         "evidence_files": [f"{e.evidence_id}: {e.filename}" for e in case.evidence],
         "findings": [{k: f[k] for k in ("id", "title", "detail", "severity", "claim")} for f in findings],
         "people": [{"name": p["name"], "role": p["role"], "involvement": p["involvement"]} for p in people[:10]],
+        "period": period or "not determined",
         "key_events": [f"{e['date']} {e['time']}".strip() + f": {e['event']}" for e in key_events[:20]],
     }
     try:
@@ -252,8 +254,9 @@ def _focus(case: Case, findings: list[dict]) -> tuple[str, str]:
 
 
 def _scope(case: Case, scope_sentence: str, timeline: dict, prompt: str) -> list[str]:
-    kinds = Counter(r.kind for r in case.records if r.kind != "generic")
-    contents = ", ".join(f"{n} {kind_name(k, n)}" for k, n in kinds.most_common(6))
+    documents = {(r.kind, r.primary_id or r.ref) for r in case.records if r.kind != "generic"}
+    kinds = Counter(kind for kind, _ in documents)                # the same PO in a PDF and a sheet counts once
+    contents = ", ".join(f"{n} {kind_name(k, n)}" for k, n in kinds.most_common(8))
     items = [scope_sentence] if scope_sentence else []
     if prompt:
         items.append(f"Question examined: {prompt}")

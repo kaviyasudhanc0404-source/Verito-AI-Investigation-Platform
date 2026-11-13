@@ -153,11 +153,13 @@ def _assess(case: Case, finding: dict) -> None:
 
     basis = finding["basis"]
     level = {"documented": 2, "pattern": 1, "statement": 0}[basis] + (independent >= 2) - bool(uncertain)
-    level = max(0, min(2, level))
+    level = max(0, min(1 if uncertain else 2, level))
     if basis == "statement" and _corroborated(case, finding):
         level = 1
         notes.append("the identifiers it mentions also appear in other evidence")
     finding["confidence"] = _LEVELS[level]
+    if basis == "statement":
+        finding["severity"] = "medium" if level >= 1 else "low"
     finding["confidence_basis"] = "; ".join([
         f"{_basis_text(basis)} in {independent} independent source{'s' if independent != 1 else ''}", *notes])
     claim = "established" if basis == "documented" and level == 2 and not uncertain else basis
